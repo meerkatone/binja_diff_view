@@ -1,0 +1,15 @@
+{
+  "description": "2026-09-08 Binary Ninja extraction of the local memcpy fixture, fixed symbolized build versus vulnerable stripped build",
+  "reference": "memcpy_reference_extract.json",
+  "target": "memcpy_vulnerable_stripped_extract.json",
+  "ground_truth": "The vulnerable build's unstripped copy has copy_record at 0x1000004c4; tests/symbol_patch_integration_tests.cpp checks this symbol before using the stripped build.",
+  "expected_pairs": [
+    {"a": "0x1000004f8", "b": "0x100000410", "identity": "main"},
+    {"a": "0x1000005ac", "b": "0x1000004c4", "identity": "copy_record"},
+    {"a": "0x100000634", "b": "0x10000050c", "identity": "strlen"},
+    {"a": "0x100000640", "b": "0x100000518", "identity": "stack_chk_fail"},
+    {"a": "0x100000658", "b": "0x100000524", "identity": "memcpy_chk"}
+  ],
+  "unmatched_reference": ["0x10000064c"],
+  "minimum_correct_pairs": 4
+}

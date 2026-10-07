@@ -1,0 +1,18 @@
+/build*/
+/toolchain/
+/rust_engine/target/
+/aqtinstall.log
+/*.dylib
+/*.so
+/*.dll
+.DS_Store
+__pycache__/
+/docs/multi-binary-diff-plan.md
+
+# Private research artifacts must never enter the public history.
+/sample_corpora/
+/sample_corpra/
+/reports/
+/pocs/
+/examples/
+/SECURITY_REVIEW.md
