@@ -77,8 +77,18 @@ bool naturalReleaseNameLess(const std::string& left, const std::string& right)
 	auto leftTokens = tokenizeReleaseName(left);
 	auto rightTokens = tokenizeReleaseName(right);
 	size_t common = std::min(leftTokens.size(), rightTokens.size());
-	for (size_t index = 0; index < common; index++)
+	for (size_t index = 0; index <= common; index++)
 	{
+		// After a shared version number, order all prerelease suffixes before
+		// the final release and other suffixes. Apply the same rule to two
+		// different suffixes; otherwise the comparator can form a cycle.
+		if (index && leftTokens[index - 1].numeric && rightTokens[index - 1].numeric)
+		{
+			bool leftPrerelease = prereleaseRemainder(leftTokens, index);
+			bool rightPrerelease = prereleaseRemainder(rightTokens, index);
+			if (leftPrerelease != rightPrerelease) return leftPrerelease;
+		}
+		if (index == common) break;
 		const auto& leftToken = leftTokens[index];
 		const auto& rightToken = rightTokens[index];
 		if (leftToken.numeric && rightToken.numeric)
@@ -96,11 +106,7 @@ bool naturalReleaseNameLess(const std::string& left, const std::string& right)
 			return leftToken.value < rightToken.value;
 	}
 	if (leftTokens.size() != rightTokens.size())
-	{
-		if (leftTokens.size() == common)
-			return !prereleaseRemainder(rightTokens, common);
-		return prereleaseRemainder(leftTokens, common);
-	}
+		return leftTokens.size() == common;
 	return false;
 }
 

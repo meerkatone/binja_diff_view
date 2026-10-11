@@ -36,6 +36,14 @@ static void testNaturalReleaseOrdering()
 	check(naturalReleaseNameLess("tool-7.0-rc2.bndb", "tool-7.0-rc10.bndb"));
 	check(naturalReleaseNameLess("tool-7.0.bndb", "tool-7.0.1.bndb"));
 	check(naturalReleaseNameLess("TOOL-9.bndb", "tool-10.bndb"));
+	std::vector<std::string> suffixes {"tool-7.0-a.bndb", "tool-7.0-rc.bndb",
+	    "tool-7.0.bndb", "tool-7.0.1.bndb", "tool-7.0-beta2.bndb"};
+	check(naturalReleaseOrder(suffixes) == std::vector<size_t>({4, 1, 2, 0, 3}));
+	for (const auto& a : suffixes)
+		for (const auto& b : suffixes)
+			for (const auto& c : suffixes)
+				if (naturalReleaseNameLess(a, b) && naturalReleaseNameLess(b, c))
+					check(naturalReleaseNameLess(a, c));
 	std::vector<std::string> unversioned {"zeta.bndb", "alpha.bndb", "alpha.bndb"};
 	check(naturalReleaseOrder(unversioned) == std::vector<size_t>({1, 2, 0}));
 }
