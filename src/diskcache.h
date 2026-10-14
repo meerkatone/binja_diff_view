@@ -5,6 +5,7 @@
 #include <QtCore/QFile>
 #include <QtCore/QFileInfo>
 #include <QtCore/QRegularExpression>
+#include <QtCore/QStandardPaths>
 #include <algorithm>
 #include <cstdint>
 #include <mutex>
@@ -17,6 +18,16 @@ inline uint64_t diskCacheBudgetBytes()
 	bool valid = false;
 	int mib = qEnvironmentVariableIntValue("BINJA_DIFF_DISK_CACHE_MB", &valid);
 	return static_cast<uint64_t>(valid ? std::clamp(mib, 0, 1048576) : 4096) * 1024 * 1024;
+}
+
+// Root of every persistent artifact: extractions, matches, and corpus manifests.
+// Empty when no writable cache location exists.
+inline QString diskCacheRoot()
+{
+	QString root = qEnvironmentVariable("BINJA_DIFF_CACHE_ROOT");
+	if (root.isEmpty())
+		root = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+	return root;
 }
 
 struct DiskCacheRetention

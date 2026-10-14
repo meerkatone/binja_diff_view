@@ -1,5 +1,7 @@
 #include "diffrenderlayer.h"
 
+#include <algorithm>
+
 #include "diffcontroller.h"
 #include "tokenemphasis.h"
 
@@ -54,6 +56,15 @@ void DiffRenderLayer::ApplyToHighLevelILBody(
 	}
 }
 
+// Linear disassembly ends a block with an empty separator line. It belongs to
+// no instruction, so a diff color there would only blur the block boundary.
+static bool hasVisibleText(const DisassemblyTextLine& line)
+{
+	return std::any_of(line.tokens.begin(), line.tokens.end(), [](const InstructionTextToken& token) {
+		return token.text.find_first_not_of(" \t") != std::string::npos;
+	});
+}
+
 void DiffRenderLayer::apply(Ref<BasicBlock> block, std::vector<DisassemblyTextLine>& lines)
 {
 	if (!block || lines.empty())
@@ -70,6 +81,8 @@ void DiffRenderLayer::apply(Ref<BasicBlock> block, std::vector<DisassemblyTextLi
 	for (size_t lineIndex = 0; lineIndex < lines.size(); lineIndex++)
 	{
 		auto& line = lines[lineIndex];
+		if (!hasVisibleText(line))
+			continue;
 		if (auto lineColor = DiffController::instance().colorForLine(
 		        func->GetView(), func->GetStart(), *blockStart, line.addr, line.instrIndex))
 			line.highlight = *lineColor;

@@ -303,12 +303,10 @@ fn greedy_assign(
     matched_b: &mut HashSet<usize>,
     threshold: f64,
 ) -> Vec<(usize, usize, f64)> {
-    candidates.sort_by(|x, y| {
-        y.0.partial_cmp(&x.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(x.1.cmp(&y.1))
-            .then(x.2.cmp(&y.2))
-    });
+    // A NaN score would compare as equal to everything and pass the threshold
+    // check below, so only finite scores are eligible.
+    candidates.retain(|candidate| candidate.0.is_finite());
+    candidates.sort_by(|x, y| y.0.total_cmp(&x.0).then(x.1.cmp(&y.1)).then(x.2.cmp(&y.2)));
     let mut out = Vec::new();
     for (score, a, b) in candidates {
         if score < threshold {
@@ -577,6 +575,23 @@ pub fn block_diff(req: &BlockDiffRequest) -> BlockDiff {
 mod tests {
     use super::*;
     use crate::il::IlToken;
+
+    #[test]
+    fn greedy_assign_skips_non_finite_scores() {
+        let (mut matched_a, mut matched_b) = (HashSet::new(), HashSet::new());
+        let accepted = greedy_assign(
+            vec![
+                (f64::NAN, 0, 0),
+                (0.9, 0, 1),
+                (f64::INFINITY, 1, 1),
+                (0.8, 1, 0),
+            ],
+            &mut matched_a,
+            &mut matched_b,
+            0.5,
+        );
+        assert_eq!(accepted, vec![(0, 1, 0.9), (1, 0, 0.8)]);
+    }
 
     fn tok(kind: &str, text: &str) -> IlToken {
         IlToken {

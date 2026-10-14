@@ -1,6 +1,7 @@
 #include "diskcache.h"
 #include "filedigest.h"
 #include <QtCore/QTemporaryDir>
+#include <QtCore/QThread>
 #include <cstdlib>
 #include <cstdio>
 
@@ -36,6 +37,33 @@ int main()
 	check(before.size() == after.size());
 	check(before.lastModified() == after.lastModified());
 	check(sha256File(after) != beforeDigest);
+
+	// The memo hashes once per unchanged file and owner, rehashes after a
+	// same-size, same-mtime replacement, and never shares entries across owners.
+	int hashes = 0;
+	FileDigestMemo memo([&hashes](const QFileInfo& info) { ++hashes; return sha256File(info); });
+	check(memo.digest(1, QFileInfo(identityFixture)) == sha256File(after));
+	check(memo.digest(1, QFileInfo(identityFixture)) == sha256File(after));
+	check(hashes == 1);
+	check(memo.digest(2, QFileInfo(identityFixture)) == sha256File(after));
+	check(hashes == 2);
+	QThread::msleep(20);
+	{
+		QFile file(identityFixture);
+		check(file.open(QIODevice::WriteOnly));
+		check(file.write("again!", 6) == 6);
+		check(file.flush());
+		check(file.setFileTime(before.lastModified(), QFileDevice::FileModificationTime));
+		file.close();
+	}
+	QFileInfo replaced(identityFixture);
+	check(replaced.size() == before.size() && replaced.lastModified() == before.lastModified());
+	// The change stamp differs even though size and modification time match.
+	check(fileChangeStamp(identityFixture).has_value());
+	check(memo.digest(1, replaced) == sha256File(replaced));
+	check(hashes == 3);
+	check(memo.digest(1, replaced) == sha256File(replaced));
+	check(hashes == 3);
 	check(root.mkpath("matches") && root.mkpath("extractions") && root.mkpath("manifests"));
 	auto write = [&](QString name, int size, qint64 time) {
 		QString path = root.filePath(name);

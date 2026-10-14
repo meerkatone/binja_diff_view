@@ -161,7 +161,70 @@ fn contextual_operand(instruction: &crate::InstructionInfo, index: usize) -> boo
         || operand.starts_with("u\"")
 }
 
-fn context_strings(function: &FunctionInfo) -> FxHashSet<String> {
+/// Build systems embed per-build directories in `__FILE__` paths, for example
+/// Apple's `BuildRoots/4~CVRVugCd1XlG.../` and `TemporaryDirectory.2P10pp/`.
+/// Those components change between otherwise identical builds, while the rest
+/// of the path (and its security vocabulary) does not. Only recognized build
+/// components are masked: ordinary names such as `AuthV1Policy` stay literal.
+const BUILD_ROOT_PARENTS: &[&str] = &["buildroots"];
+const TEMPORARY_DIRECTORY_PREFIXES: &[&str] = &["temporarydirectory."];
+
+/// A content digest of at least 16 hex digits, as in Nix store paths or Bazel
+/// output bases.
+fn is_hex_digest(token: &str) -> bool {
+    token.len() >= 16
+        && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && token.bytes().any(|byte| byte.is_ascii_digit())
+        && token.bytes().any(|byte| byte.is_ascii_alphabetic())
+}
+
+fn mask_path_component(component: &str, parent: Option<&str>) -> String {
+    if parent.is_some_and(|parent| BUILD_ROOT_PARENTS.contains(&parent.to_ascii_lowercase().as_str()))
+    {
+        return "<generated>".into();
+    }
+    let lower = component.to_ascii_lowercase();
+    if let Some(prefix) = TEMPORARY_DIRECTORY_PREFIXES
+        .iter()
+        .find(|prefix| lower.starts_with(**prefix))
+    {
+        return format!("{}<generated>", &component[..prefix.len()]);
+    }
+    component
+        .split_inclusive(|character: char| !character.is_ascii_alphanumeric())
+        .map(|piece| {
+            let token = piece.trim_end_matches(|character: char| !character.is_ascii_alphanumeric());
+            if is_hex_digest(token) {
+                format!("<generated>{}", &piece[token.len()..])
+            } else {
+                piece.to_string()
+            }
+        })
+        .collect()
+}
+
+/// Comparison key for a context string. Only path-like strings are masked.
+fn context_key(text: &str) -> String {
+    if !text.contains('/') && !text.contains('\\') {
+        return text.to_string();
+    }
+    let mut key = String::with_capacity(text.len());
+    let mut parent = None;
+    for (index, component) in text.split(['/', '\\']).enumerate() {
+        if index > 0 {
+            // Both separators compare equal; Windows and POSIX builds of the
+            // same source tree differ only there.
+            key.push('/');
+        }
+        key.push_str(&mask_path_component(component, parent));
+        parent = Some(component);
+    }
+    key
+}
+
+/// Context strings keyed by their comparison form. Values keep the original
+/// text, which supplies the evidence vocabulary.
+fn context_strings(function: &FunctionInfo) -> FxHashMap<String, String> {
     function
         .strings
         .iter()
@@ -174,7 +237,10 @@ fn context_strings(function: &FunctionInfo) -> FxHashSet<String> {
                     contextual_operand(ins, i).then_some(operand.clone())
                 })
         }))
-        .map(|s| s.to_ascii_lowercase())
+        .map(|s| {
+            let key = context_key(&s).to_ascii_lowercase();
+            (key, s.to_ascii_lowercase())
+        })
         .collect()
 }
 
@@ -288,8 +354,17 @@ fn direct_node(
     let removed_instructions = multiset_added(&after_instructions, &before_instructions);
     let before_strings = before.map(context_strings).unwrap_or_default();
     let after_strings = context_strings(after);
-    let mut added_strings: Vec<_> = after_strings.difference(&before_strings).cloned().collect();
+    let mut added_strings: Vec<_> = after_strings
+        .iter()
+        .filter(|(key, _)| !before_strings.contains_key(*key))
+        .map(|(_, text)| text.clone())
+        .collect();
     added_strings.sort();
+    let removed_strings: Vec<_> = before_strings
+        .iter()
+        .filter(|(key, _)| !after_strings.contains_key(*key))
+        .map(|(_, text)| text)
+        .collect();
 
     let mut facts = SecurityFacts::default();
     let mut evidence = BTreeSet::new();
@@ -318,7 +393,7 @@ fn direct_node(
                 .map(|label| format!("added string context: {label}")),
         );
     }
-    for string in before_strings.difference(&after_strings) {
+    for string in removed_strings {
         let mut labels = BTreeSet::new();
         observe(&mut facts, &mut labels, string, 1);
         evidence.extend(
@@ -336,7 +411,7 @@ fn direct_node(
     if added_instructions.is_empty()
         && removed_instructions.is_empty()
         && added_strings.is_empty()
-        && before_strings.is_subset(&after_strings)
+        && before_strings.keys().all(|key| after_strings.contains_key(key))
     {
         counter.insert("no semantic delta evidence was extracted".into());
     }
@@ -743,6 +818,77 @@ mod tests {
             .iter()
             .any(|s| s.starts_with("removed string context:")));
         assert!(matches[0].security.counter_evidence.is_empty());
+    }
+
+    #[test]
+    fn build_root_path_churn_is_not_string_context() {
+        let path = |root: &str, temporary: &str| {
+            format!(
+                "/AppleInternal/Library/BuildRoots/{root}/Library/Caches/com.apple.xbs/\
+                 TemporaryDirectory.{temporary}/Sources/RemoteDesktop/ScreensharingDaemon/\
+                 DaemonRPCMessageHandler.c"
+            )
+        };
+        let old_path = path("4~CT03ugDqWrVC6SsR-fIDPVcgjo35Rmzwet0V3Yg", "zSpBnw");
+        let new_path = path("4~CVRVugCd1XlGwnRtD1jMRjn4aQ0wI89eOxzb5h4", "2P10pp");
+        let before = function(1, "worker", &[("ret", "")], &[&old_path]);
+        let after = function(2, "worker", &[("ret", "")], &[&new_path]);
+        let mut matches = vec![changed(&before, &after)];
+        assess_diff(&[before], &[after], &mut matches);
+        assert!(
+            matches[0]
+                .security
+                .evidence
+                .iter()
+                .all(|s| !s.contains("string context:")),
+            "{:?}",
+            matches[0].security.evidence
+        );
+        assert!(matches[0]
+            .security
+            .counter_evidence
+            .iter()
+            .any(|s| s == "no semantic delta evidence was extracted"));
+
+        // A different source file in the same build root is still a change.
+        let moved = new_path.replace("DaemonRPCMessageHandler.c", "AuthenticationHandler.c");
+        let before = function(1, "worker", &[("ret", "")], &[&old_path]);
+        let after = function(2, "worker", &[("ret", "")], &[&moved]);
+        let mut matches = vec![changed(&before, &after)];
+        assess_diff(&[before], &[after], &mut matches);
+        assert!(matches[0]
+            .security
+            .evidence
+            .iter()
+            .any(|s| s.starts_with("added string context:")));
+    }
+
+    #[test]
+    fn only_recognized_build_components_are_masked() {
+        assert_eq!(
+            context_key("BuildRoots/4~CT03ugDqWrVC6SsR-fIDPVcgjo35Rmzwet0V3Yg/x/TemporaryDirectory.zSpBnw/a.c"),
+            "BuildRoots/<generated>/x/TemporaryDirectory.<generated>/a.c"
+        );
+        assert_eq!(
+            context_key("/nix/store/0c7f3a9d2b8e41f6a5d9c3e7b1f0a2d4-openssl-3.0/lib"),
+            "/nix/store/<generated>-openssl-3.0/lib"
+        );
+        // Ordinary mixed-case, numbered names keep their security vocabulary.
+        assert_eq!(context_key("/etc/AuthV1Policy"), "/etc/AuthV1Policy");
+        assert_eq!(context_key("/opt/arm64e/x86_64/UTF8String.m"), "/opt/arm64e/x86_64/UTF8String.m");
+        // Without a path separator, nothing is masked.
+        assert_eq!(context_key("BuildRoots 4~CT03ugDqWrVC6SsR"), "BuildRoots 4~CT03ugDqWrVC6SsR");
+    }
+
+    #[test]
+    fn versioned_policy_paths_remain_security_context() {
+        let before = function(1, "worker", &[("ret", "")], &["/etc/AuthV1Policy"]);
+        let after = function(2, "worker", &[("ret", "")], &["/etc/UserV2Policy"]);
+        let mut matches = vec![changed(&before, &after)];
+        assess_diff(&[before], &[after], &mut matches);
+        let evidence = &matches[0].security.evidence;
+        assert!(evidence.iter().any(|s| s == "added string context: identity or process authority"), "{evidence:?}");
+        assert!(evidence.iter().any(|s| s == "removed string context: authentication negotiation"), "{evidence:?}");
     }
 
     #[test]

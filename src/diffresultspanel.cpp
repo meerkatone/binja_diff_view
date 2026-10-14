@@ -562,9 +562,17 @@ void DiffResultsPanel::setLinearMode(bool linear)
 	m_open->setText(linear ? "Open in linear" : "Open in graphs");
 }
 
+std::optional<std::pair<uint64_t, uint64_t>> DiffResultsPanel::selectedMatchAddresses() const
+{
+	QModelIndex item = selectedCurrentIndex();
+	if (!item.isValid() || item.data(RowKindRole).toInt() != MatchedRow)
+		return std::nullopt;
+	return std::pair {item.data(AddressARole).toULongLong(), item.data(AddressBRole).toULongLong()};
+}
+
 bool DiffResultsPanel::restoreSelectedGraphDiff()
 {
-	QModelIndex item = m_tree->currentIndex();
+	QModelIndex item = selectedCurrentIndex();
 	if (!item.isValid() || item.data(RowKindRole).toInt() != MatchedRow)
 		return false;
 	uint64_t addressA = item.data(AddressARole).toULongLong();
@@ -842,7 +850,7 @@ void DiffResultsPanel::updateSelectionDetails()
 		                       .arg(matchedSelected));
 		return;
 	}
-	QModelIndex item = m_tree->currentIndex();
+	QModelIndex item = selectedCurrentIndex();
 	m_open->setEnabled(item.isValid());
 	if (!item.isValid())
 	{
@@ -889,6 +897,16 @@ std::set<uint64_t> DiffResultsPanel::matchedAddresses(bool allVisible) const
 		if (item.data(RowKindRole).toInt() == MatchedRow)
 			addresses.insert(item.data(AddressARole).toULongLong());
 	return addresses;
+}
+
+// A filter can remove the selected row while Qt moves the current index to a
+// remaining row without selecting it. Evidence and Open act on the selection.
+QModelIndex DiffResultsPanel::selectedCurrentIndex() const
+{
+	QModelIndex current = m_tree->currentIndex();
+	if (!current.isValid() || !m_tree->selectionModel()->isRowSelected(current.row(), current.parent()))
+		return {};
+	return current;
 }
 
 std::optional<std::pair<uint64_t, uint64_t>> DiffResultsPanel::selectedUnmatchedPair() const
@@ -1080,7 +1098,7 @@ void DiffResultsPanel::portSymbols(
 
 void DiffResultsPanel::openSelected()
 {
-	QModelIndex item = m_tree->currentIndex();
+	QModelIndex item = selectedCurrentIndex();
 	if (!item.isValid())
 		return;
 	int kind = item.data(RowKindRole).toInt();

@@ -102,6 +102,8 @@ CorpusPairMetrics calculateCorpusPairMetricsWithFlags(const FunctionMatchMaps& m
 
 uint64_t currentProcessResidentBytes();
 
+struct CorpusSchedulerChannel;
+
 class CorpusScheduler : public QObject
 {
 	Q_OBJECT
@@ -123,6 +125,7 @@ class CorpusScheduler : public QObject
 
   private:
 	QFutureWatcher<CorpusResultRef>* m_watcher = nullptr;
+	std::shared_ptr<CorpusSchedulerChannel> m_channel;
 	BinaryNinja::Ref<BinaryNinja::BackgroundTask> m_task;
 	QElapsedTimer m_runTimer;
 	QTimer* m_memoryTimer = nullptr;

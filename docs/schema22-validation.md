@@ -1,5 +1,9 @@
 # Schema 22 corrections and validation
 
+> **Historical document.** This records the schema 22 update. The current match
+> schema is 25; for current behavior see
+> [How Binja Diff View works](how-it-works.md).
+
 This update fixes the defects found in the public-source review without
 attempting to copy another tool's confidence percentages.
 

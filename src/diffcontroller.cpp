@@ -360,7 +360,16 @@ bool DiffController::cacheOverlay(OverlayCacheEntry entry, uint64_t revision)
 
 void DiffController::OnAnalysisFunctionAdded(BinaryView* view, Function*) { invalidateView(view); }
 void DiffController::OnAnalysisFunctionRemoved(BinaryView* view, Function*) { invalidateView(view); }
-void DiffController::OnAnalysisFunctionUpdated(BinaryView* view, Function*) { invalidateView(view); }
+// Whole-binary extraction requests each function's IL, which restores lazily
+// loaded analysis and reports a function update on the requesting thread.
+// Nothing an extraction or match depends on has changed; invalidating there
+// would discard the extraction that caused the update and restart it
+// indefinitely, whether or not the database has unsaved edits.
+void DiffController::OnAnalysisFunctionUpdated(BinaryView* view, Function*)
+{
+	if (!materializingFunctionAnalysis())
+		invalidateView(view);
+}
 void DiffController::OnSymbolAdded(BinaryView* view, Symbol*) { invalidateSymbolView(view); }
 void DiffController::OnSymbolRemoved(BinaryView* view, Symbol*) { invalidateSymbolView(view); }
 void DiffController::OnSymbolUpdated(BinaryView* view, Symbol*) { invalidateSymbolView(view); }
@@ -423,6 +432,7 @@ void DiffController::persistMatchesForFile(FileMetadata* file)
 	if (!file)
 		return;
 	std::set<PendingMatchKey> visited;
+	std::vector<std::pair<BinaryViewRef, BinaryViewRef>> pairs;
 	for (const auto& [frame, partnerFrame] : m_explicitPartners)
 	{
 		DiffViewContainer* pane = paneForFrame(frame);
@@ -440,11 +450,31 @@ void DiffController::persistMatchesForFile(FileMetadata* file)
 		    reinterpret_cast<uintptr_t>(partner->data()->GetObject()));
 		if (!visited.insert(key).second)
 			continue;
-		DiffEngine& engine = DiffEngine::instance();
-		engine.persistCachedFunctionMatches(pane->data(), partner->data());
-		engine.persistCachedBinaryExtraction(pane->data());
-		engine.persistCachedBinaryExtraction(partner->data());
+		pairs.emplace_back(pane->data(), partner->data());
 	}
+	if (pairs.empty())
+		return;
+	// Persisting hashes each saved database in full and writes cache files, which
+	// can take seconds for large BNDBs. Keep that work off the GUI thread.
+	(void)QtConcurrent::run([pairs = std::move(pairs)]() {
+		DiffEngine& engine = DiffEngine::instance();
+		for (const auto& [a, b] : pairs)
+		{
+			try
+			{
+				// Pairs are deduplicated without direction; persist whichever
+				// orientations are cached (each is a separate security assessment).
+				engine.persistCachedFunctionMatches(a, b);
+				engine.persistCachedFunctionMatches(b, a);
+				engine.persistCachedBinaryExtraction(a);
+				engine.persistCachedBinaryExtraction(b);
+			}
+			catch (const std::exception& exception)
+			{
+				LogWarn("binja_diff_view: could not refresh caches after save: %s", exception.what());
+			}
+		}
+	});
 }
 
 QString DiffController::activateMatch(
@@ -990,9 +1020,13 @@ void DiffController::beginFunctionMatch(DiffViewContainer* src, DiffViewContaine
 {
 	if (!src || !partner || !src->data() || !partner->data())
 		return;
-	auto pendingKey = canonicalViewPair(
-	    reinterpret_cast<uintptr_t>(src->data()->GetObject()),
-	    reinterpret_cast<uintptr_t>(partner->data()->GetObject()));
+	// Matches are directional (A is the baseline), so only requests for the same
+	// baseline/candidate orientation may share one worker.
+	const bool fromCandidate = isCandidatePane(src, partner);
+	BinaryViewRef a = fromCandidate ? partner->data() : src->data();
+	BinaryViewRef b = fromCandidate ? src->data() : partner->data();
+	const PendingMatchKey pendingKey = {
+	    reinterpret_cast<uintptr_t>(a->GetObject()), reinterpret_cast<uintptr_t>(b->GetObject())};
 	emit functionMatchingStarted(src->frame(), partner->frame());
 
 	src->setBusy(true);
@@ -1011,9 +1045,6 @@ void DiffController::beginFunctionMatch(DiffViewContainer* src, DiffViewContaine
 		retryFunctionMatchWhenAnalysisSettles(pendingKey, 0);
 		return;
 	}
-	const bool fromCandidate = isCandidatePane(src, partner);
-	BinaryViewRef a = fromCandidate ? partner->data() : src->data();
-	BinaryViewRef b = fromCandidate ? src->data() : partner->data();
 	Ref<BackgroundTask> task = new BackgroundTask("Binja Diff: preparing function match…", true);
 	auto* watcher = new QFutureWatcher<FunctionMatchMapsRef>(this);
 	connect(watcher, &QFutureWatcher<FunctionMatchMapsRef>::finished, this,

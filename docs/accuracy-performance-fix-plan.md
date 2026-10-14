@@ -1,5 +1,10 @@
 # Accuracy and performance fix plan
 
+> **Historical document.** This records planning at match schema 20. The
+> current match schema is 25; for current behavior see
+> [How Binja Diff View works](how-it-works.md), and for later changes see
+> [schema and validation history](history.md).
+
 This document retains the schema-20 planning baseline below. Later schemas and
 performance batches supersede parts of that baseline; see
 [schema 22 validation](schema22-validation.md) for later matching corrections.

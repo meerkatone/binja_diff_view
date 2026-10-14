@@ -88,7 +88,9 @@ Check that:
 
 ### The Rust engine fails to load
 
-Reinstall and remove any old top-level `librust_diff` copy. The correct layout is:
+Reinstall the plugin. An installed plugin loads the engine only from its private
+directory (or from `BINJA_DIFF_ENGINE_PATH`); an old top-level `librust_diff`
+copy is ignored and can be removed. The correct layout is:
 
 ```text
 plugins/binja_diff_view.dylib

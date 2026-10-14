@@ -8,6 +8,7 @@ namespace bn_graph_diff { struct FunctionMatchMaps; }
 #include <optional>
 #include <utility>
 
+#include <QtCore/QModelIndex>
 #include <QtWidgets/QWidget>
 
 class QComboBox;
@@ -35,6 +36,7 @@ class DiffResultsPanel : public QWidget
 	void beginInitialMatch();
 	void showInitialError(const QString& error);
 	void setLinearMode(bool linear);
+	std::optional<std::pair<uint64_t, uint64_t>> selectedMatchAddresses() const;
 	bool restoreSelectedGraphDiff();
 
   private:
@@ -47,6 +49,7 @@ class DiffResultsPanel : public QWidget
 	void portSymbols(SymbolPortDirection direction, bool allVisible, bool currentPair = false,
 	    std::optional<std::pair<uint64_t, uint64_t>> addressPair = std::nullopt);
 	std::set<uint64_t> matchedAddresses(bool allVisible) const;
+	QModelIndex selectedCurrentIndex() const;
 	std::optional<std::pair<uint64_t, uint64_t>> selectedUnmatchedPair() const;
 
 	std::shared_ptr<const bn_graph_diff::FunctionMatchMaps> m_resultSnapshot;

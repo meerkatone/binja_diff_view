@@ -2,11 +2,11 @@
 
 #include <QtConcurrent/QtConcurrentRun>
 #include <QtCore/QElapsedTimer>
-#include <QtCore/QPointer>
 
 #include <algorithm>
 #include <exception>
 #include <map>
+#include <mutex>
 
 #if defined(__APPLE__)
 #include <mach/mach.h>
@@ -101,21 +101,33 @@ CorpusPairMetrics calculateCorpusPairMetrics(const FunctionMatchMaps& maps,
 	return calculateCorpusPairMetricsWithFlags(maps, sourceFlags, targetFlags, filters);
 }
 
+// Shared by a scheduler and its worker. The scheduler detaches on destruction
+// instead of waiting for a running pair, so the worker never posts to a
+// destroyed object. Whichever side observes the other gone finishes the task.
+struct CorpusSchedulerChannel
+{
+	std::mutex mutex;
+	CorpusScheduler* scheduler = nullptr;
+	bool workerDone = false;
+};
+
 namespace {
 
 template <typename Callback>
-void publishToGui(const QPointer<CorpusScheduler>& scheduler, Callback callback)
+void publishToGui(const std::shared_ptr<CorpusSchedulerChannel>& channel, Callback callback)
 {
+	std::lock_guard<std::mutex> lock(channel->mutex);
+	CorpusScheduler* scheduler = channel->scheduler;
 	if (!scheduler)
 		return;
+	// Qt discards the queued call if the receiver is destroyed before it runs.
 	QMetaObject::invokeMethod(scheduler, [scheduler, callback = std::move(callback)]() {
-		if (scheduler)
-			callback(scheduler);
+		callback(scheduler);
 	}, Qt::QueuedConnection);
 }
 
 CorpusResultRef runCorpus(const CorpusRunRequest& request,
-	Ref<BackgroundTask> task, const QPointer<CorpusScheduler>& scheduler)
+	Ref<BackgroundTask> task, const std::shared_ptr<CorpusSchedulerChannel>& scheduler)
 {
 	auto result = std::make_shared<CorpusResult>();
 	for (const auto& binary : request.binaries)
@@ -241,9 +253,16 @@ CorpusScheduler::CorpusScheduler(QObject* parent) : QObject(parent)
 
 CorpusScheduler::~CorpusScheduler()
 {
+	// Detach rather than wait: cancellation only takes effect between stages, so
+	// waiting here would block the GUI until a running pair match completed.
 	cancel();
-	if (m_watcher && m_watcher->isRunning())
-		m_watcher->waitForFinished();
+	if (!m_channel)
+		return;
+	std::lock_guard<std::mutex> lock(m_channel->mutex);
+	m_channel->scheduler = nullptr;
+	// The worker already returned, but its finished handler will no longer run.
+	if (m_channel->workerDone && m_task && !m_task->IsFinished())
+		m_task->Finish();
 }
 
 bool CorpusScheduler::start(const CorpusRunRequest& request)
@@ -285,10 +304,28 @@ bool CorpusScheduler::start(const CorpusRunRequest& request)
 		m_watcher = nullptr;
 	});
 
-	QPointer<CorpusScheduler> scheduler(this);
+	auto channel = std::make_shared<CorpusSchedulerChannel>();
+	channel->scheduler = this;
+	m_channel = channel;
 	Ref<BackgroundTask> task = m_task;
-	m_watcher->setFuture(QtConcurrent::run(
-	    [request, task, scheduler]() { return runCorpus(request, task, scheduler); }));
+	m_watcher->setFuture(QtConcurrent::run([request, task, channel]() {
+		CorpusResultRef result;
+		try
+		{
+			result = runCorpus(request, task, channel);
+		}
+		catch (...)
+		{
+			auto failed = std::make_shared<CorpusResult>();
+			failed->partial = true;
+			result = failed;
+		}
+		std::lock_guard<std::mutex> lock(channel->mutex);
+		channel->workerDone = true;
+		if (!channel->scheduler && task && !task->IsFinished())
+			task->Finish();
+		return result;
+	}));
 	return true;
 }
 

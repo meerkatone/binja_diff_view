@@ -8,7 +8,7 @@
 //! matched-callee renames are resolved
 //! through a rename map — so the differ compares structure, not surface text.
 //!
-//! The frontend (Binary Ninja Python) extracts a typed token stream per IL
+//! The native Binary Ninja plugin extracts a typed token stream per IL
 //! line via `InstructionTextToken`; this module is pure and testable without
 //! Binary Ninja.
 

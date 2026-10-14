@@ -3,6 +3,7 @@
 // form a diffable pair managed by DiffController.
 #pragma once
 
+#include <functional>
 #include <optional>
 #include <vector>
 
@@ -32,6 +33,13 @@ struct DiffWorkspacePane
 // Return one current analyzed view per distinct open FileContext, with the
 // active file first. Corpus setup and pair setup share this exact view list.
 std::vector<DiffWorkspacePane> collectOpenDiffPanes(UIContext* context);
+
+// Run work off the GUI thread behind an application-modal progress dialog, then
+// confirm that every pane is still open in the context with the same view.
+// Returns false if the user cancelled or a pane changed meanwhile; cancelled
+// work still finishes in the background and the caller must ignore its result.
+bool runPaneWorkWithProgress(UIContext* context, const std::vector<DiffWorkspacePane>& panes,
+	const QString& label, std::function<void()> work);
 
 // Reusable pair drill-down used by both Open Workspace and corpus matrix cells.
 void openPairWorkspace(UIContext* context, const DiffWorkspacePane& left,

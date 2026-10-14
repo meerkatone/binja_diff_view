@@ -403,6 +403,30 @@ int run(const std::string& referencePath, const std::string& strippedPath,
 	            && restoredMatches->matchCount == maps.matchCount,
 	        "restore prepared pair after save without rematching"))
 		return 1;
+
+	// A raw binary is reanalyzed on open, so its durable identity must follow the
+	// effective analysis settings. A BNDB's saved analysis is covered by its digest.
+	const std::string settingsField = "analysis_settings_sha256";
+	auto rawIdentity = engine.persistentIdentity(reference);
+	auto databaseIdentity = engine.persistentIdentity(stripped);
+	if (!expect(rawIdentity && rawIdentity->find(settingsField) != std::string::npos,
+	        "raw binary identity includes effective analysis settings")
+	    || !expect(databaseIdentity && databaseIdentity->find(settingsField) == std::string::npos,
+	        "BNDB identity relies on its saved content"))
+		return 1;
+	const std::string settingKey = "analysis.limits.maxFunctionSize";
+	Ref<Settings> settings = Settings::Instance();
+	const uint64_t originalLimit = settings->Get<uint64_t>(settingKey, reference);
+	settings->Set(settingKey, originalLimit + 1, reference, SettingsResourceScope);
+	auto changedIdentity = engine.persistentIdentity(reference);
+	settings->Reset(settingKey, reference, SettingsResourceScope);
+	auto restoredIdentity = engine.persistentIdentity(reference);
+	if (!expect(changedIdentity && *changedIdentity != *rawIdentity,
+	        "changing an analysis setting changes the raw binary identity")
+	    || !expect(restoredIdentity == rawIdentity,
+	        "restoring the setting restores the raw binary identity"))
+		return 1;
+
 	stripped->GetFile()->Close();
 	stripped = nullptr;
 	target = nullptr;

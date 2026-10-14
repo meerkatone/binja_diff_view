@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -12,6 +13,8 @@
 #include <vector>
 
 #include "binaryninjaapi.h"
+
+class QSaveFile;
 #include "weightedcache.h"
 #include "sharedresultcache.h"
 #include "keyedworkgate.h"
@@ -37,6 +40,10 @@ std::string functionDisplayName(BinaryViewRef view,
 
 // Decorative/volatile token types excluded from the diff (comments, tags…).
 // Shared with the render layer so line identification matches the extraction.
+// True while the calling thread is requesting a function's IL for whole-binary
+// extraction. Binary Ninja reports the resulting function update on that thread.
+bool materializingFunctionAnalysis();
+
 inline bool tokenIgnoredForDiff(BNInstructionTextTokenType type)
 {
 	switch (type)
@@ -221,8 +228,8 @@ using FunctionMatchMapsRef = std::shared_ptr<const FunctionMatchMaps>;
 
 // Persistent artifacts and patch signatures use these values to reject data
 // produced by an incompatible extraction or matching implementation.
-inline constexpr int CurrentMatchSchemaVersion = 24;
-inline constexpr int CurrentExtractionSchemaVersion = 11;
+inline constexpr int CurrentMatchSchemaVersion = 25;
+inline constexpr int CurrentExtractionSchemaVersion = 12;
 
 // A prepared result is valid only while the exact current object and both view
 // epochs remain current. UI construction may span event turns, so carrying the
@@ -365,20 +372,42 @@ class DiffEngine
 	std::shared_ptr<void> prepareBinaryCached(BinaryViewRef view,
 	    const BinaryExtractionRef& extraction, BinaryNinja::Ref<BinaryNinja::BackgroundTask> task);
 	BinaryExtractionRef loadPersistentBinaryExtraction(BinaryViewRef view) const;
-	void storePersistentBinaryExtraction(
-	    BinaryViewRef view, const std::string& extraction) const;
+	// `stillCurrent` runs with m_matchMutex held, after the file identity is
+	// hashed and immediately before the artifact's atomic rename. Invalidation
+	// removes artifacts under the same mutex, so a write commits only while the
+	// snapshot is still valid: unchanged view epochs and, for a pair, no Rematch.
+	// Validity does not depend on memory retention, which a zero or exceeded
+	// cache budget can decline.
+	using PersistenceCheck = std::function<bool()>;
+	bool commitIfCurrent(QSaveFile& file, const PersistenceCheck& stillCurrent) const;
+	void storePersistentBinaryExtraction(BinaryViewRef view, const std::string& extraction,
+	    const PersistenceCheck& stillCurrent) const;
 	BinaryExtractionRef extractBinaryForMatchCached(BinaryViewRef view,
 	    BinaryNinja::Ref<BinaryNinja::BackgroundTask> task, const char* side);
 	std::optional<FunctionMatchMaps> loadPersistentFunctionMatches(
 	    BinaryViewRef a, BinaryViewRef b) const;
-	void storePersistentFunctionMatches(
-	    BinaryViewRef a, BinaryViewRef b, const FunctionMatchMaps& maps) const;
+	void storePersistentFunctionMatches(BinaryViewRef a, BinaryViewRef b,
+	    const FunctionMatchMaps& maps, const PersistenceCheck& stillCurrent) const;
 	mutable std::mutex m_matchMutex;
 	KeyedWorkGate<MatchKey> m_matchWork;
 	KeyedWorkGate<ViewKey> m_extractionWork;
 	mutable SharedResultCache<MatchKey, FunctionMatchMaps> m_matchCache;
 	mutable WeightedLruCache<ViewKey, BinaryExtractionRef> m_extractionCache;
 	std::map<ViewKey, uint64_t> m_viewEpoch;
+	// Rematch discards one pair without an analysis change, so it advances this
+	// count rather than the view epochs.
+	std::map<MatchKey, uint64_t> m_pairInvalidation;
+	// Require m_matchMutex. An absent entry has never been invalidated: 0.
+	uint64_t viewEpoch(const ViewKey& key) const
+	{
+		auto found = m_viewEpoch.find(key);
+		return found == m_viewEpoch.end() ? 0 : found->second;
+	}
+	uint64_t pairInvalidation(const MatchKey& key) const
+	{
+		auto found = m_pairInvalidation.find(key);
+		return found == m_pairInvalidation.end() ? 0 : found->second;
+	}
 };
 
 }  // namespace bn_graph_diff

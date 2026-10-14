@@ -196,12 +196,15 @@ The Rust library stays in the private directory because it is an FFI dependency,
 not a standalone Binary Ninja plugin. The native plugin loads these entry points:
 
 - `rust_diff_diff_json` — whole-binary function matching;
+- `rust_diff_diff_json_cancellable` — the same matching with a cancellation
+  callback polled between phases; optional, used when exported;
 - `rust_diff_block_diff_json` — basic-block matching plus accepted-pair
   line/token detail and whole-function IL similarity;
 - `rust_diff_il_diff_json` — semantic line and token changes;
 - `rust_diff_free_string` — FFI result ownership.
 
-When all four versioned snapshot exports are available, the native plugin uses
+The four entry points above other than the cancellable one are required. When
+all four versioned snapshot exports are available, the native plugin uses
 `rust_diff_prepare_json_v1`, `rust_diff_diff_prepared_v1`,
 `rust_diff_prepared_size_v1`, and `rust_diff_free_prepared_v1` to retain immutable
 parsed functions and matching features across pairs. Older engines continue
@@ -217,7 +220,9 @@ The workspace contains two native `ViewFrame` objects above a full-width results
 table. The comparison panes and table can be hidden independently without
 destroying their state. The persistent Graph diff / Linear selector changes both
 native panes together; Space is synchronized through the same control. Returning
-to Graph diff reopens the selected pair and restores its overlay. Linear view
+to Graph diff reopens the selected pair and restores its overlay. Both graphs
+open at that pair rather than at each Linear cursor, which can differ between
+panes. The workspace uses the active tab as baseline A. Linear view
 projects the same block, line, and token state through Binary Ninja's native
 render-layer callbacks, including whole-body HLIL. The shared IL selector
 preserves the graph's existing form on open so workspace creation does not cause
@@ -287,7 +292,41 @@ table width elides the visible value. Instructions are sent once inside their
 owning blocks; Rust reconstructs the flat instruction view used by
 whole-function metrics. Unused raw instruction bytes are not read or
 transported. This whole-binary pass always uses disassembly, independent of the
-visible IL. Rust preprocesses functions and immutable scoring features in
+visible IL.
+
+Binary Ninja restores a database's functions lazily. Until something requests a
+function's IL, its disassembly omits call-target symbols, data symbols, and
+analysis annotations: `bl 0x1000749b8` instead of `bl sub_1000749b8`. A
+database's extraction therefore depended on which functions had been viewed,
+and a pair could differ in almost every call. Extraction schema 12 requests
+each function's LLIL and renders the function while holding it, so every
+function is extracted from the same analysis state. The core frees
+unreferenced IL, so a separate prefetch pass would only generate it twice. Up to
+eight workers extract functions concurrently and keep function-list order.
+Freshly opened `screensharingd` 26.6 and 26.6.1 BNDBs (about 1,900 functions
+each) extract and match in about seven seconds.
+
+On AArch64 an address is built from a page base and a low immediate, as in
+`adrp x3, page` then `add x3, x3, #0x97`. Moving a string or global changes both
+without changing behavior:
+
+- The `adrp` operand is a 4 KiB page base. Binary Ninja renders it as whatever
+  symbol starts on that page, sometimes followed by an annotation of the string
+  there. Extraction folds the operand into one page-address operand and does
+  not collect strings through it.
+- An immediate is extracted as an address when it equals the page offset of the
+  instruction's resolved reference, or of the constant address its destination
+  register holds afterwards (for a pointer consumed by a later instruction).
+  That address must itself be mapped in the image; an image-base-relative
+  reading does not count, since any small constant shares its own page offset.
+  Only AArch64 uses this rule. Other immediates, including bounds, masks, and
+  `__LINE__` arguments to logging calls, remain literal.
+
+Function string context comes from each instruction's own code references
+(except `adrp`), data-wrapper references, and derived strings. An integer is
+also tried as an image-relative address only when that address lies in a
+section; a small offset such as `[x8, #0x1c0]` otherwise lands in the Mach-O
+header and collects load-command strings like `/usr/lib/dyld`. Rust preprocesses functions and immutable scoring features in
 parallel, then reuses those features across every matching phase.
 
 Rust accepts one-to-one pairs in ordered phases:
@@ -314,10 +353,22 @@ to a section in the current BinaryView. Generated address-derived
 `data_<address>` normalize as well. Imported, debug, and analyst-provided
 symbols remain literal, as do integer tokens regardless of magnitude. This
 keeps named call-target changes, large bounds, and masks significant.
-Confidence is
-`45% + 45% × similarity`; this replaces the old narrow calibration that rounded
-almost every strong SmallPrimes row to `85.0%`. Schema 20 caps that method
-score at 50% for non-binding pairs with a local ambiguity margin below 0.01.
+Confidence depends on the phase that accepted the pair, blended with the
+pair's similarity `s`:
+
+| Phase | Confidence |
+|---|---|
+| Exact, Manual | 100% |
+| Name | 90% + 10% × s |
+| MdIndex | 80% + 10% × s |
+| Structural | 70% + 15% × s |
+| CallGraph | 50% + 35% × s |
+| SmallPrimes | 45% + 45% × s |
+| Heuristic | 35% + 45% × s |
+
+The SmallPrimes formula replaces an older narrow calibration that rounded
+almost every strong SmallPrimes row to `85.0%`. Non-binding pairs with a local
+ambiguity margin below 0.01 are capped at 50%.
 
 Candidates within each connected ambiguity component are assigned for maximum
 cardinality and then maximum pairing score. This prevents a locally strongest
@@ -337,7 +388,7 @@ canonicalization assigns generated locals stable per-function alpha identities;
 stack-slot renumbering stays cosmetic, while changed alias relationships remain
 semantic.
 
-Schema 22's native MD-inspired key uses shortest-path depth from the function
+The native MD-inspired key uses shortest-path depth from the function
 entry instead of address-ordered DFS ranks. Edge contributions are sorted before
 summation. Block permutations and branch relocation therefore preserve the key.
 Missing entries use zero-in-degree roots, with a common level for unreachable
@@ -355,7 +406,7 @@ probability of correct correspondence or of a security fix.
 
 The matcher deliberately favors predictable runtime on large binaries:
 
-- schema 24 retains unique exact/name reservations and uses tentative
+- schema 24 introduced, and schema 25 retains, unique exact/name reservations and uses tentative
   neighborhood refinement for ranking. Mutually unique supported candidates
   extend a separate one-to-one context map. Each round reads a complete snapshot;
   context is pruned when support no longer exceeds contradictions or loses a
@@ -387,68 +438,69 @@ The matcher deliberately favors predictable runtime on large binaries:
 - the strongest exact-content fingerprint retains meaningful symbol and integer
   operands while normalizing explicit addresses and generated address-derived
   symbols.
-- schema 15 scores every changed or added function in a separate finite product
-  lattice. Direct patch-delta facts join with one-hop call-neighbor context to a
-  closure. Schema 20 computes that closure in one pass over immutable direct
-  facts. Only direct level-2 facts transfer, propagated level-1 facts do
-  not retransmit, and a target must contain a direct patch mechanic before it
-  accepts context. A `Strong` result additionally requires direct security-
-  semantic evidence, preventing a branch-only relocation from inheriting the
-  label of a distant authentication function. Schema 21 observes both added and
-  removed normalized instructions, with direction recorded in evidence labels.
-  Schema 22 also masks StringToken, DataSymbolToken, and non-call CodeSymbolToken
-  operands when extracting direct operation deltas. Their text supplies level-1
-  context, including when it is absent from the separate strings list. A string-only change cannot
-  produce Strong; ambiguous non-binding pairs are capped at Possible. Conditional
-  x86 jumps and ARM condition branches count as guards; ARM bitwise operations
-  and unconditional branches do not. Size-direction filters are independent of
-  security scores, so low-scoring structural changes remain accessible.
-- schema 16 stores the baseline and patched identities in requested order.
-  Reversed workspaces use a distinct pair artifact, so a cached security score
-  cannot be interpreted against the wrong patch direction. Extraction schema 11
-  resolves function-to-string evidence through Binary Ninja code references,
-  one level of data wrapping such as CFString objects, and derived-string xrefs
-  when the installed API provides them. Renderer tokens remain a fallback.
-  Derived-string enrichment fails safely when the core cannot materialize a
-  record, and JSON encoding replaces malformed UTF-8 from analysis metadata.
-- schema 17 puts `Conflicting` rows back into the Relevant review filter and
-  ignores generated `WPP_<hex>_Traceguids` operands when looking for
-  maintenance-only vocabulary. It rejects schema-16 pair artifacts so the
-  corrected assessment is recomputed from the cached extraction.
-- schema 18 requires two independent direct patch mechanics before joining
-  one-hop context. Relevant keeps every Strong and Conflicting row, but admits a
-  Possible row under its original rule only when its direct score is at least
-  0.39. Schema 22 retains that path and also admits Possible rows with direct
-  score >= 0.13 and total score >= 0.30. This keeps operation-plus-context
-  candidates visible after correcting falsely direct string evidence. Pure
-  context (direct score zero) remains excluded. Strong remains narrower.
-- schema 19 left support-versus-contradiction ties in the candidate `may` set
-  instead of promoting them to fixed-point anchors. Schema 20 replaces that
-  promotion mechanism as described above. Patch-signature schema 9
-  records whole-block insertions and deletions as semantic lines, treats a
-  confirmed absent anchor block as evaluated zero-similarity evidence, prefers
-  HLIL over compiler-oriented MLIL, and retains line addresses for navigation.
-  It scores patch blocks by diff indices so structured nodes may safely share a
-  source address. Graph-local labels and generated jump-table relocations are
-  cosmetic; changed bounds and call targets remain semantic.
-
-The `Strong` classification rule is unchanged from schema 15. The schema-16
-`Security: relevant` UI filter is narrower than its predecessor: it selects
-only `Strong` and `Possible`, rather than every row whose raw score is at least
-0.30, and therefore excludes `Conflicting`. Richer extraction-schema-11 string
-and xref evidence can still promote an individual row out of `Unknown`; that is
-an evidence change, not a broader filter. Security labels remain heuristic
-triage rather than vulnerability findings.
-Schema 17 fixes the resulting recall regression. Relevant now includes
-`Strong`, `Possible`, and `Conflicting`; Strong remains the narrower direct-
-evidence view.
-Schema 18 narrows the Possible part of Relevant to three direct evidence
-dimensions. This prevents a lone new comparison plus inherited neighbor context
-from filling the review queue.
 
 These limits affect match phase or recall, not the one-to-one invariant. Review
 low-confidence and unmatched rows when comparing heavily reordered or relocated
 binaries.
+
+### Security triage
+
+Security triage is a post-match projection: it never changes pair assignment,
+reported similarity, or match confidence. Every changed or added function is
+scored in a finite product lattice over direct patch-delta facts:
+
+- Added and removed normalized instructions both count, and evidence labels
+  record their direction. Side A is assumed to be the baseline and side B the
+  patched build. Pair artifacts store both identities in that order, so a
+  reversed workspace computes and caches its own assessment.
+- String, data-symbol, and non-call code-symbol operands are masked when
+  extracting direct operation deltas. Their text, and the extracted string
+  references, supply context only. A string-only change cannot produce
+  `Strong`.
+- String references are resolved through code references, one level of data
+  wrapping such as CFString objects, and derived-string xrefs where the API
+  provides them, with renderer tokens as a fallback. Malformed UTF-8 is
+  replaced rather than failing extraction.
+- Path strings are compared with recognized build components masked. Apple
+  `__FILE__` paths embed `BuildRoots/<random>/` and
+  `TemporaryDirectory.<XXXXXX>/`, so every function using such a path
+  previously gained added and removed string context from words like `Login`,
+  `Message`, `Remote`, and `Roots` in the unchanged remainder. The component
+  after `BuildRoots`, the suffix after `TemporaryDirectory.`, and hex digests of
+  at least 16 digits (as in Nix or Bazel paths) are masked. Ordinary names stay
+  literal, so `/etc/AuthV1Policy` → `/etc/UserV2Policy` still changes
+  authentication and identity context. Strings without a path separator are
+  never masked, and evidence labels come from the original text.
+- Conditional x86 jumps and ARM condition branches count as guards; ARM bitwise
+  operations and unconditional branches do not.
+- Generated `WPP_<hex>_Traceguids` operands are treated as instrumentation
+  identity churn, so they alone do not supply maintenance (logging)
+  counter-evidence. Ordinary tracing changes still do.
+
+Direct facts join one-hop call-neighbor context in a single pass. A function
+accepts context only when it has at least two independent direct patch
+mechanics; only direct facts transfer, and propagated context is never passed
+on. The result is `Unknown`, `Possible`, `Strong`, or `Conflicting`:
+
+- `Strong` requires direct security-semantic evidence.
+- Ambiguous non-binding pairs are capped at `Possible`.
+- **Security: relevant** shows every `Strong` and `Conflicting` row, plus
+  `Possible` rows with a direct score of at least 0.39, or a direct score of at
+  least 0.13 and a total score of at least 0.30. Pure context (a direct score
+  of zero) is excluded.
+- Byte-size filters are independent of security scores, so low-scoring
+  structural changes remain reachable.
+
+Patch signatures (signature schema 16) record whole-block insertions and
+deletions as semantic lines and treat a confirmed absent anchor block as
+evaluated zero-similarity evidence. They prefer HLIL over MLIL, retain line
+addresses for navigation, and score patch blocks by diff index so structured
+nodes can share a source address. Graph-local labels and generated jump-table
+relocations are cosmetic; changed bounds and call targets remain semantic.
+
+Security labels are heuristic triage, not vulnerability findings. The rules
+above are the current ones; earlier schemas used different filters, recorded in
+[schema and validation history](history.md).
 
 ### Scores and row state
 
@@ -480,108 +532,21 @@ matching inputs and formulas, so their numeric results are not expected to
 agree. See the [algorithm audit and fix plan](accuracy-performance-fix-plan.md)
 for the comparison and remaining calibration work.
 
-The schema-12 baseline includes three BinDiff 8 comparisons made from the same
-binaries:
-
-| Pair | BinDiff overall | Native overall | Same accepted address mappings |
-|---|---:|---:|---:|
-| `screensharingd` 26.6 to 26.6.1 | 98.5144% | 99.0515% | 1,741 / 1,878 |
-| `nwifi.sys` 18874 to 20680 | 99.0298% | 99.6767% | 1,003 / 1,004 |
-| CVE-2024-38063 vulnerable to patched | 99.2718% | 99.9617% | 5,581 / 5,581 |
-
-Every named mapping agrees. The 137 `screensharingd` disagreements and the one
-`nwifi.sys` disagreement are address-generated functions, where repeated small
-helpers make one-to-one assignment ambiguous. These results compare behavior;
-they do not establish either matcher as ground truth.
-
-Replaying the same extraction payloads with schema 13 preserved match counts,
-unmatched sets, content states, and similarity scores. For `screensharingd`, 37
-Native assignments changed. Agreement with BinDiff rose from 1,741 to 1,758 of
-the 1,878 shared mappings: 17 mappings moved into agreement, none moved out of
-agreement, and 19 changed to a third assignment. Matched call-edge consistency
-rose from 6,424 to 6,444 edges. The `nwifi.sys` and CVE-2024-38063 mappings were
-unchanged. BinDiff is comparison evidence rather than ground truth, so the
-remaining generated-function ambiguity still needs independent labels.
-
-Schema 14 replayed the live `screensharingd` extraction without changing match
-count, unmatched sets, content states, or similarity. It changed 52 generated
-assignments relative to schema 13. Agreement with the same BinDiff reference
-rose from 1,758 to 1,779 of 1,878 shared mappings: 21 moved into agreement and
-none moved out. Consistent mapped call edges rose from 6,446 to 6,476 of 6,519.
-The matcher took 0.334 seconds in the measured release replay, compared with
-0.308 seconds for schema 13. BinDiff remains comparison evidence rather than
-ground truth.
-
-Schema 15 preserves those schema-14 mappings and body scores; security triage
-is a post-match projection. A controlled `screensharingd` 26.6 to 26.6.1 replay
-started with 700 changed matches and four additions. Joining the three string
-deltas recorded in `strings_delta.csv` reduced that set to three `Strong` rows
-and seven `Strong`/`Possible` rows. The three direct rows were
-`HandleViewerAuthenticationMessages` (which contains the analyst-labelled
-`HandleAuthTypeMessage` region), `SendRSAResponse`, and the added
-`SaveAdvertisedAuthTypes`; the changed `SendSRPChallenge` row is seventh through
-one-hop context. This controlled replay used the generated `sub_<address>`
-symbols that were present at measurement time, so its result was not caused by
-analyst names. The BNDBs were subsequently updated and independently reloaded
-on 2026-09-01; the four role names above were verified at their exact function
-starts in both versions. The replay enriched an older extraction with the
-observed strings. A fresh schema-10 UI run remains the end-to-end extractor
-check.
-
-The rematched open pair did not reproduce that controlled count. Its 712 changed
-matches and four additions produced seven `Strong` and thirteen
-`Strong`/`Possible` rows. All four known bug functions remain in the Strong
-queue, so the live filter reduces 716 rows to 13 (98.2%) without losing one of
-those functions. Three other changed functions score Strong and six score
-Possible. The security pass assumes that side B is the patched side. Schema 16
-records that contract as `security_baseline_identity` and
-`security_patched_identity` and keeps reversed artifacts separate. The 3/7
-controlled result is not the expected UI count. Those measurements predate the
-schema-16 cache and extraction changes and require a rematch before comparison.
-
-The subsequent live schema-16 `spoolsv` rematch records vulnerable build 2336
-as A and fixed build 2525 as B. It produced 2,332 accepted matches, 21 Changed
-rows, no baseline-only functions, 16 patched-only functions, 99.0677% overall
-similarity, and 99.3186% coverage. BinDiff accepts the same number of functions
-and agrees on 2,331 address mappings (99.9571%). The sole disagreement remains
-`YAsyncGetRemoteNotifications`: BinDiff selects `AcquireChannel`, while Native
-selects `AsyncGetNotifications` through `CallGraph` evidence.
-
-That run has zero `Strong`, 22 `Possible`, and two `Conflicting` rows across
-the 21 changed and 16 patched-only functions. The schema-16 `Relevant` filter
-showed 22 rows. Schema 17 restores the two Conflicting rows, so the same
-assessment produces a 24-row review queue after rematching.
-
-The schema-16 filter change reduced recall on the `nwifi.sys` fixture. Its
-schema-15 and schema-16 artifacts have identical mappings and identical
-security assessments: zero `Strong`, one `Possible`, and one `Conflicting`.
-The known `Dot11Translate80211ToEthernetNdisPacket` change is the Conflicting
-row at 0.445. It surfaced under the old numeric Relevant predicate and is hidden
-by the schema-16 state predicate. Its maintenance counter-signal is generated
-by a changed WPP `Traceguids` symbol rather than proof that the patch is merely
-logging work.
-
-Schema 17 restores that row to Relevant even if another counter-signal leaves
-it `Conflicting`. It also recognizes generated WPP trace-GUID identifiers as
-instrumentation identity churn, so that token alone no longer supplies the
-maintenance veto. Focused tests preserve both behaviors while retaining
-maintenance evidence for ordinary tracing changes. A live restart and rematch
-confirmed the known `nwifi.sys` function as `Possible` at 0.445 with no
-maintenance counter-evidence; all 1,005 accepted mappings remained unchanged.
-
-The schema-18 curl 8.3.0 to 8.4.0 replay preserves all 1,416 mappings while
-reducing the Relevant queue from 50 rows to 17. The same replay gate retains the
-known `nwifi.sys` function and all four known `screensharingd` functions.
-The live UI rematch then reproduced 1,416 matches, 28 A-only rows, and 43 B-only
-rows. Weak rows remained in All functions with no security label, confirming
-that schema 18 changed triage without changing pair assignment.
+Measured comparisons against BinDiff 8 and per-schema replays of the
+`screensharingd`, `nwifi.sys`, `spoolsv`, and curl fixtures are recorded in
+[schema and validation history](history.md). They compare behavior; they do not
+establish either matcher as ground truth.
 
 Rows are green for exact content, blue for cosmetic relocation differences,
 amber for changed content, and red for unmatched functions. The dark
 `rust_diff`-derived base colors
 are brightened by 50%; active selection still uses Binary Ninja's native style.
 Rows live in a `QAbstractTableModel` behind a sorting/filtering proxy, so search,
-filter, and refresh do not create or hide one Qt widget item per function. The
+filter, and refresh do not create or hide one Qt widget item per function.
+The evidence text and **Open in graphs** act on the selected row. When a search
+or filter hides that row, Qt moves the current index to a remaining row without
+selecting it; the panel then shows the selection prompt rather than that row's
+evidence. The
 compact metric sections use font- and style-derived initial widths that reserve
 space for their labels, sort arrows, and representative cell values. Every
 section uses interactive resize mode, including State, both function columns,
@@ -640,6 +605,13 @@ schema 16 rejects signatures computed before these fixes.
 | Amber `#D7B41E` | semantically changed pair |
 | Blue `#556EC8` | cosmetic-only difference |
 
+Disassembly graphs apply the same `adrp` page and page-offset rules as the
+whole-binary extraction, so a relocated string or global is cosmetic rather
+than a red/green line pair. Tokens that follow an annotation without an operand
+index, such as the string Binary Ninja shows for a page base, are analysis
+display and are not compared. Linear disassembly leaves the empty separator
+line after each block uncolored.
+
 The overlay is keyed by BinaryView identity, function, block, line, and
 instruction index. It remains in memory and never modifies analysis colors.
 An entry-node function label can precede the extracted instruction lines; the
@@ -696,20 +668,43 @@ filters operate directly on match summaries. A single traversal of accepted
 matches also counts functions retained on only one side of a filtered pair.
 
 Whole-binary results are cached in memory by Binary Ninja file session and
-BinaryView type. Clean, saved BNDB pairs also use an atomic persistent cache,
-keyed by file path, size, modification time, BinaryView type, cache schema, and
-A-to-B order. Reversed A/B workspaces use a separate security assessment.
-Concurrent
-requests share one worker; failed, cancelled, stale, malformed, or unsaved
-results are not persisted.
+BinaryView type. Pairs of clean, unmodified, fully analyzed views also use an
+atomic persistent cache, keyed by file path, size, modification time, a SHA-256
+digest of the file, BinaryView type, cache schema, Binary Ninja core version,
+and A-to-B order. A raw binary (one not opened from a BNDB) is reanalyzed when
+it is opened, so its key also includes a digest of the effective settings
+outside the `ui.`, `network.`, `updates.`, `python.`, `pluginManager.`, and
+`binjaDiffView.` groups; changing an analysis setting therefore misses the
+cache instead of reusing results from different analysis. A BNDB's saved
+analysis is covered by its content digest.
+
+The digest is computed once per file session and reused until the file's path,
+size, modification time, or change stamp changes. The change stamp is the
+device, inode, and nanosecond ctime on macOS and Linux, and the volume serial,
+file index, and NTFS change time on Windows; ordinary file APIs cannot restore
+either after rewriting a file. Reversed A/B workspaces use a separate security
+assessment. Concurrent requests for the same A-to-B orientation share one
+worker; failed, cancelled, stale, malformed, or unsaved results are not
+persisted.
 
 The input extraction is cached independently for each clean, saved BinaryView
 under the same identity rules. Its payload has a schema-specific path and a
 SHA-256 integrity check. This lets an A-to-C comparison reuse the exact A
 snapshot previously extracted for A-to-B. Any analysis, symbol, or byte update
-drops the in-memory snapshot; a modified/analysis-changed view cannot read or
+drops the in-memory snapshot. The exception is the function update Binary Ninja
+reports, on the requesting thread, when extraction itself requests a lazily
+restored function's IL. Invalidating on it would discard that extraction and
+restart it indefinitely, with or without unsaved edits in the database. Every persistent write, including the
+background write after a save, hashes the file identity and writes a temporary
+file, then commits it by atomic rename under the same mutex that invalidation
+uses to delete artifacts. It commits only if the view epochs are unchanged and,
+for a pair, no Rematch has invalidated it since the snapshot was taken. This
+validity is tracked separately from memory retention, so a snapshot the memory
+cache declines to keep (a zero budget or an oversized result) is still written.
+An edit, save, or Rematch made meanwhile cancels the write: an older snapshot is never filed under a
+newer saved identity, and a deleted pair artifact is not recreated; a modified/analysis-changed view cannot read or
 write the persistent form. Saving publishes an already-current extraction under
-the file's new modification-time identity.
+the saved file's new identity, which includes its content digest.
 
 The process extraction cache also retains each snapshot's prepared Rust handle.
 It uses least-recently-used eviction with a 64-entry ceiling and a default
@@ -761,10 +756,15 @@ temporary writes, or deletion failures can temporarily exceed the limit. Smaller
 budgets trade disk space for recomputation. In-memory matches remain usable.
 
 The Open Workspace action probes this cache against the existing analyzed views
-before constructing new graph frames. A hit populates the function table first,
+before constructing new graph frames. The probe runs in the background behind a
+progress dialog because it hashes both files on first use; the Open Corpus
+Workspace action likewise hashes its binaries in the background before the
+workspace opens. Cancelling either dialog leaves no workspace open. A hit populates the function table first,
 then queues only the selected function's block/line rendering. Saving either
 participating BNDB rewrites the completed pair under the file's new identity, so
-the save itself cannot make the next workspace open look like a cold diff. A
+the save itself cannot make the next workspace open look like a cold diff. That
+rewrite, and the corpus identity refresh after a save, run in the background;
+the save itself does not wait for them. A
 cache miss runs one background whole-binary match; it does not run a second,
 provisional extraction path.
 
@@ -787,23 +787,14 @@ no global cache lock during extraction, Rust matching or file I/O and retain no
 result payloads. Oversized or disabled caches can still require sequential
 recomputation. This does not add parallel corpus scheduling.
 
-### Live cache-hit verification
+### Cache-hit costs
 
-The persistent lifecycle was exercised against two clean PE BNDBs using both
-Binary Ninja UI MCP and the Sidekick Bridge. The first workspace open produced
-one 2.1 MB artifact containing 5,266 accepted matches. Opening another workspace
-for the unchanged pair produced a second diff tab while the artifact's timestamp
-and SHA-256 remained unchanged. Before and after both opens, both backends
-reported `IdleState`, zero active analysis time, and no file or analysis
-modifications.
-
-Those observations distinguish the relevant costs:
-
-- an unchanged artifact proves the whole-binary matcher did not run again;
-- idle, unmodified BinaryViews prove workspace opening did not request BNDB
-  reanalysis;
-- any residual delay after a cache hit belongs to native widget/ViewFrame setup
-  and rendering the selected function overlay.
+On a cache hit, the whole-binary matcher does not run again (the persistent
+artifact's timestamp and digest stay unchanged), and opening the workspace
+requests no reanalysis. Any remaining delay comes from native widget and
+ViewFrame setup and from rendering the selected function's overlay. The live
+measurement behind this is recorded in [schema and validation
+history](history.md#live-cache-hit-verification).
 
 Analysis and symbol changes invalidate affected entries. **Rematch** explicitly
 invalidates the active pair and starts matching again. Matching waits for two
@@ -835,7 +826,10 @@ Binary Ninja loads the installed native library from the top-level user plugin
 directory, not from this repository's `build/` directory. When the repository
 itself is the `binja_diff_view/` child of that plugin directory, CMake detects
 the layout and copies each successful build to the live top-level plugin path,
-along with the private Rust engine. This prevents a restart from silently
+along with the private Rust engine. This refresh is controlled by the
+`BINJA_DIFF_REFRESH_LIVE_PLUGIN` CMake option, which is on by default. In a
+build directory configured with it off, run `cmake --install build` after
+building. This prevents a restart from silently
 loading a stale installed library. Native code already mapped into a running
 Binary Ninja process is unchanged, so Binary Ninja must still be restarted
 after a build.

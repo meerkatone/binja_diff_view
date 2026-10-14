@@ -896,7 +896,7 @@ impl MatchingEngine {
         let names_b: Vec<Option<&str>> = functions_b.iter().map(meaningful_name).collect();
 
         let mut evidence = TrustedMatchEvidence::new(functions_a, functions_b);
-        evidence.seed_unique(&exact_a, &exact_b, cancelled)?;
+        evidence.seed_unique(exact_a, exact_b, cancelled)?;
         evidence.seed_unique(&names_a, &names_b, cancelled)?;
         // Recover neighborhood discrimination through tentative correspondences.
         // These influence ranking only; they never reserve an endpoint or become
@@ -1041,10 +1041,10 @@ impl MatchingEngine {
             if !self.keyed_matching(
                 functions_a,
                 functions_b,
-                &features_a,
-                &features_b,
-                &exact_a,
-                &exact_b,
+                features_a,
+                features_b,
+                exact_a,
+                exact_b,
                 MatchType::Exact,
                 0.0,
                 &evidence,
@@ -1060,8 +1060,8 @@ impl MatchingEngine {
             self.name_matching(
                 functions_a,
                 functions_b,
-                &features_a,
-                &features_b,
+                features_a,
+                features_b,
                 &evidence,
                 &mut matches,
                 &mut used_a,
@@ -1073,10 +1073,10 @@ impl MatchingEngine {
             if !self.keyed_matching(
                 functions_a,
                 functions_b,
-                &features_a,
-                &features_b,
-                &md_a,
-                &md_b,
+                features_a,
+                features_b,
+                md_a,
+                md_b,
                 MatchType::MdIndex,
                 self.similarity_threshold,
                 &evidence,
@@ -1092,8 +1092,8 @@ impl MatchingEngine {
             if !self.keyed_matching(
                 functions_a,
                 functions_b,
-                &features_a,
-                &features_b,
+                features_a,
+                features_b,
                 &spp_a,
                 &spp_b,
                 MatchType::SmallPrimes,
@@ -1113,8 +1113,8 @@ impl MatchingEngine {
             if !self.keyed_matching(
                 functions_a,
                 functions_b,
-                &features_a,
-                &features_b,
+                features_a,
+                features_b,
                 &wl_a,
                 &wl_b,
                 MatchType::Structural,
@@ -1132,8 +1132,8 @@ impl MatchingEngine {
             if !self.call_graph_propagation(
                 functions_a,
                 functions_b,
-                &features_a,
-                &features_b,
+                features_a,
+                features_b,
                 &evidence,
                 &mut matches,
                 &mut used_a,
@@ -1147,8 +1147,8 @@ impl MatchingEngine {
             self.fuzzy_matching(
                 functions_a,
                 functions_b,
-                &features_a,
-                &features_b,
+                features_a,
+                features_b,
                 &evidence,
                 &mut matches,
                 &mut used_a,

@@ -106,8 +106,8 @@ pub unsafe extern "C" fn rust_diff_diff_prepared_v1(
 
 /// Diff two binaries from JSON-encoded function arrays and return the full
 /// DiffResult as a JSON C string (caller frees with rust_diff_free_string).
-/// Returns null on parse/diff failure. This is the entry point the Binary
-/// Ninja Python frontend uses; no engine handle is needed.
+/// Returns null on parse/diff failure. No engine handle is needed; the native
+/// plugin prefers the prepared-snapshot API when the engine exports it.
 ///
 /// # Safety
 /// Both pointers must reference valid, NUL-terminated UTF-8 strings for the
@@ -213,7 +213,7 @@ pub unsafe extern "C" fn rust_diff_diff_json_cancellable(
 /// rust_diff_free_string), or null on parse failure. Unlike a textual diff,
 /// this normalizes volatile tokens and resolves matched-callee renames, so a
 /// renamed call is reported as cosmetic while a replaced call is a real change.
-/// Callable directly from the Python frontend at diff-view time.
+/// Called by the native plugin when it renders a selected-function diff.
 ///
 /// # Safety
 /// `request_json` must reference a valid, NUL-terminated UTF-8 string for the

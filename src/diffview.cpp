@@ -3,8 +3,11 @@
 #include <algorithm>
 #include <map>
 #include <optional>
+#include <tuple>
 
+#include <QtCore/QEventLoop>
 #include <QtCore/QFileInfo>
+#include <QtCore/QFutureWatcher>
 #include <QtCore/QPointer>
 #include <QtCore/QTimer>
 #include <QtWidgets/QHBoxLayout>
@@ -12,11 +15,13 @@
 #include <QtWidgets/QInputDialog>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QMessageBox>
+#include <QtWidgets/QProgressDialog>
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QSizePolicy>
 #include <QtWidgets/QSplitter>
 #include <QtWidgets/QToolButton>
 #include <QtWidgets/QVBoxLayout>
+#include <QtConcurrent/QtConcurrentRun>
 
 #include "diffcontroller.h"
 #include "corpusview.h"
@@ -329,6 +334,11 @@ class SideBySideDiffTab : public QWidget
 		}
 		else
 		{
+			// The selected pair is restored after the switch. Open both graphs at
+			// that pair as well: a pane whose second navigation races the switch
+			// otherwise stays at its own Linear cursor, out of step with its partner.
+			if (auto selected = m_results->selectedMatchAddresses())
+				std::tie(leftOffset, rightOffset) = *selected;
 			m_left->navigate(m_leftDiffType, leftOffset);
 			m_right->navigate(m_rightDiffType, rightOffset);
 			DiffController::instance().setGraphPresentation(m_left, m_right, true);
@@ -440,12 +450,59 @@ static void openLoadedBinariesSideBySide()
 	// Probe the durable pair artifact while the original analyzed views are
 	// still current and idle. Workspace construction must consume this result;
 	// it must not be the operation that decides whether matching is necessary.
-	auto preparedMatches = bn_graph_diff::DiffEngine::instance().prepareCachedFunctionMatches(
-	    left.data, right.data);
-	openPairWorkspace(ctx, left, right, std::move(preparedMatches));
+	// The probe hashes both saved databases on first use, so it runs off the GUI
+	// thread.
+	auto preparedMatches =
+	    std::make_shared<std::optional<bn_graph_diff::PreparedFunctionMatches>>();
+	BinaryViewRef leftData = left.data, rightData = right.data;
+	if (!runPaneWorkWithProgress(ctx, {left, right}, "Checking cached function matches…",
+	        [preparedMatches, leftData, rightData]() {
+		        *preparedMatches = bn_graph_diff::DiffEngine::instance()
+		            .prepareCachedFunctionMatches(leftData, rightData);
+	        }))
+		return;
+	openPairWorkspace(ctx, left, right, std::move(*preparedMatches));
 }
 
 }  // namespace
+
+bool runPaneWorkWithProgress(UIContext* context, const std::vector<DiffWorkspacePane>& panes,
+	const QString& label, std::function<void()> work)
+{
+	QProgressDialog progress(label, "Cancel", 0, 0);
+	progress.setWindowTitle("Binja Diff");
+	progress.setWindowModality(Qt::ApplicationModal);
+	progress.setMinimumDuration(300);
+	QFutureWatcher<void> watcher;
+	QEventLoop loop;
+	QObject::connect(&watcher, &QFutureWatcher<void>::finished, &loop, &QEventLoop::quit);
+	QObject::connect(&progress, &QProgressDialog::canceled, &loop, &QEventLoop::quit);
+	watcher.setFuture(QtConcurrent::run([work = std::move(work)]() {
+		try
+		{
+			work();
+		}
+		catch (const std::exception& exception)
+		{
+			LogWarn("binja_diff_view: background preparation failed: %s", exception.what());
+		}
+	}));
+	if (!watcher.isFinished())
+		loop.exec();
+	if (!watcher.isFinished() || progress.wasCanceled())
+		return false;
+	// The dialog appears only after a delay, so tabs could close before it did.
+	const auto contexts = UIContext::allContexts();
+	if (!contexts.count(context))
+		return false;
+	const auto current = collectOpenDiffPanes(context);
+	for (const auto& pane : panes)
+		if (std::none_of(current.begin(), current.end(), [&pane](const DiffWorkspacePane& open) {
+			    return open.fileContext == pane.fileContext && open.data == pane.data;
+		    }))
+			return false;
+	return true;
+}
 
 std::vector<DiffWorkspacePane> collectOpenDiffPanes(UIContext* context)
 {

@@ -28,10 +28,11 @@ The graph diff shows `Dot11PacketConverterReceivePacket` in two builds of
 ## Compare two binaries
 
 1. Open two analyzed binaries in Binary Ninja.
-2. Select **Plugins → Binja Diff View → Binja Diff: Open Workspace**.
-3. Wait for matching to finish.
-4. Search, filter, or sort the function table.
-5. Double-click a matched row, press Enter, or select **Open in graphs**.
+2. Make the baseline (older) binary's tab active; it becomes side A.
+3. Select **Plugins → Binja Diff View → Binja Diff: Open Workspace**.
+4. Wait for matching to finish.
+5. Search, filter, or sort the function table.
+6. Double-click a matched row, press Enter, or select **Open in graphs**.
 
 The table highlights each row by state:
 
@@ -82,11 +83,14 @@ evidence rather than a verdict. Similarity includes instruction order and operan
 but does not prove semantic equivalence. Confidence is a heuristic method score,
 not a calibrated probability. Ambiguous inferred pairs are capped at 50%.
 
-Match schema 24 reserves unique exact/name anchors before assigning uncertain
+Match schema 25 reserves unique exact/name anchors before assigning uncertain
 pairs. Tentative neighborhood correspondences help rank candidates but never
 reserve endpoints or establish binding identity. Rare shared strings can nominate
 functions outside the size shortlist when their instruction bodies also overlap.
-Older saved match results are recomputed under these rules. See the
+The first comparison of a database requests each function's analysis, because
+Binary Ninja restores functions lazily and an unvisited function otherwise
+renders without symbols. Older saved extractions and match results are
+recomputed under these rules. See the
 [matching internals](docs/how-it-works.md) for details.
 
 An **Unmatched · review** row has a possible counterpart supported by a shared
@@ -198,6 +202,37 @@ To associate unmatched functions, select exactly one **A only** row and one
 **B only** row, then use the unmatched-pair action before transferring the
 symbol.
 
+## Settings
+
+Find these under **Settings → Binja Diff View**:
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `binjaDiffView.blockMatchThreshold` | `0.5` | Minimum IL line similarity for two basic blocks to pair in the overlay. Lower values pair more blocks; higher values mark more blocks added or removed. |
+| `binjaDiffView.colorblindPalette` | off | Use a colorblind-safe overlay palette (vermillion, blue, yellow, grey) instead of red, green, amber, and blue. Applies to new diffs. |
+| `binjaDiffView.symbolPortMinConfidence` | `0.9` | Minimum match confidence for the bulk "port all visible symbols" actions. Explicitly selected rows are not filtered. |
+
+## Caches and environment variables
+
+Clean, fully analyzed binaries and BNDBs keep their extractions, function
+matches, and corpus settings in an on-disk cache, so reopening an unchanged
+pair is instant. Raw binaries are also keyed by the effective analysis
+settings, so changing a setting recomputes their results. The
+cache lives in `binja_diff_view/` under Binary Ninja's cache directory, for
+example `~/Library/Caches/Vector 35/Binary Ninja/binja_diff_view` on macOS. It
+holds `extractions/`, `matches/`, and `corpora/`. To clear it, quit Binary
+Ninja and delete that directory; results are recomputed on the next diff.
+
+Set these before launching Binary Ninja:
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `BINJA_DIFF_DISK_CACHE_MB` | `4096` | Byte budget for cached extractions and matches (512-file limit). `0` bypasses disk reads and writes. |
+| `BINJA_DIFF_CACHE_ROOT` | Binary Ninja's cache directory | Alternative root for the whole on-disk cache: extractions, matches, and corpus settings. |
+| `BINJA_DIFF_SNAPSHOT_CACHE_MB` | `512` | In-memory budget for extracted binaries and prepared matching features. `0` disables retention. |
+| `BINJA_DIFF_PAIR_CACHE_MB` | `256` | In-memory budget for whole-pair match results. `0` disables retention. |
+| `BINJA_DIFF_ENGINE_PATH` | unset | Load the Rust engine from this path before the bundled copy. |
+
 ## Build and install
 
 The plugin requires CMake 3.15 or newer, a C++20 compiler, Rust with Cargo, and
@@ -235,3 +270,5 @@ For the symbol workflow and safeguards, see
 [Symbol porting](docs/symbol-porting.md).
 For development checks and desktop acceptance tests, see
 [Testing](docs/testing.md).
+Earlier schema notes and validation measurements are kept in
+[Schema and validation history](docs/history.md).

@@ -130,8 +130,8 @@ impl BinaryDiffEngine {
         })
     }
 
-    /// Diff two binaries from JSON-encoded `Vec<FunctionInfo>` (the FFI path
-    /// used by the Binary Ninja Python frontend).
+    /// Diff two binaries from JSON-encoded `Vec<FunctionInfo>` (the JSON FFI
+    /// path used by the native plugin).
     pub fn perform_diff_json(&self, json_a: &str, json_b: &str) -> Result<DiffResult> {
         self.perform_diff_json_cancellable(json_a, json_b, &|| false)
     }
@@ -179,7 +179,7 @@ impl BinaryDiffEngine {
             cancelled,
         )?;
 
-        let security = security::assess_diff(&functions_a, &functions_b, &mut matches);
+        let security = security::assess_diff(functions_a, functions_b, &mut matches);
 
         let matched_a: HashSet<u64> = matches.iter().map(|m| m.function_a.address).collect();
         let matched_b: HashSet<u64> = matches.iter().map(|m| m.function_b.address).collect();

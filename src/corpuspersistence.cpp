@@ -5,7 +5,6 @@
 #include <QtCore/QFile>
 #include <QtCore/QFileInfo>
 #include <QtCore/QSaveFile>
-#include <QtCore/QStandardPaths>
 
 #include <algorithm>
 #include <array>
@@ -14,6 +13,7 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "diskcache.h"
 #include "nlohmann/json.hpp"
 
 using json = nlohmann::json;
@@ -464,7 +464,7 @@ std::optional<std::string> corpusManifestPath(const CorpusManifest& manifest)
 		material += binary.persistentIdentity + "\n";
 	QByteArray digest = QCryptographicHash::hash(
 	    QByteArray::fromStdString(material), QCryptographicHash::Sha256).toHex();
-	QString root = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+	QString root = diskCacheRoot();
 	if (root.isEmpty())
 		return std::nullopt;
 	return QDir(root).filePath("binja_diff_view/corpora/" + digest + ".json").toStdString();

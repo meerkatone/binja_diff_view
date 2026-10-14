@@ -2,7 +2,6 @@
 
 Keep routine validation small. The Rust regression suite is fast; saved-binary
 replays, licensed integration checks, and benchmarks are separate opt-in steps.
-No unit tests have been removed.
 
 | Change | Checks |
 | --- | --- |
@@ -92,6 +91,14 @@ instance to load it. Use existing analyzed BNDBs and leave them unsaved.
    even when a function-label line precedes the instructions. Click **Clear**:
    both panes must lose diff colors and markers. Open an unchanged function:
    it must show zero changed, removed, and added blocks without diff overlays.
+   Open both BNDBs freshly and run the workspace before viewing any function,
+   so extraction starts from lazily restored functions. A function whose only
+   differences are relocated strings and call targets must not be `Strong`,
+   and its relocated `adrp`/`add` lines must be cosmetic rather than red/green.
+   In Linear view, the blank line after each block must stay uncolored. Type a
+   search that hides the selected row: the evidence text must return to the
+   selection prompt. Switch Linear → Graph after the panes' Linear cursors have
+   diverged: both graphs must open at the selected pair.
 2. Open an ordered-lineage corpus with three builds. Select a completed matrix
    cell and record its accepted-match count and mean similarity. Toggle
    **Score filters → Include exact matches** off and on. The selected cell's
@@ -105,6 +112,35 @@ Record input names, function addresses, screenshots, and the unmodified export
 under `build/`. For an all-pairs check, compare five analyzed builds and verify
 that all ten pairs complete before checking the export.
 
+### Cache persistence through the MCP UI
+
+With Binary Ninja MCP UI available, exercise the persistence paths on copies of
+a BNDB pair, never on the originals. Binary Ninja can report a database as
+modified immediately after opening it, and an MCP close with `save: prompt`
+can then write it; open originals only for read-only checks and leave them
+open rather than closing them through MCP. Open both copies, make A active, and run
+**Open Workspace**; both extractions and the A-to-B pair artifact must appear.
+Rename a function in B without saving: nothing new may be written. Save B: no
+artifact under B's new identity may contain the old name. Rename again, rerun
+the workspace while B is unsaved (it must finish rather than restart extraction
+and must show the new name), then save: the after-save write must store that
+name under B's newest identity. **Rematch** must delete the pair artifact and
+rewrite it. Repeat a fresh run with `BINJA_DIFF_SNAPSHOT_CACHE_MB=0` and
+`BINJA_DIFF_PAIR_CACHE_MB=0` (`open --env ...` on macOS); artifacts must still be
+written. These checks cannot force the race windows themselves.
+
+### Inspect an extraction snapshot
+
+Each persistent extraction under the Binary Ninja cache directory
+(`binja_diff_view/extractions/*.cache`; on macOS
+`~/Library/Caches/Vector 35/Binary Ninja/`) has a magic line, a base64 identity
+whose `path` names the database, a SHA-256 line, and a JSON function list. Skip
+the first three lines to read the JSON. Call operands should be mostly code
+symbols (`operand_types` 64) and imports (67). A snapshot dominated by possible
+addresses (5) was extracted from functions whose analysis was not restored.
+Treat cache files as read-only; move one aside, rather than editing it, to force
+re-extraction.
+
 ## Extraction and symbol integration
 
 The committed memcpy extraction pair has five address-labelled counterparts,
@@ -115,7 +151,7 @@ release engine:
 python3 tests/accuracy_memcpy_fixture.py build/rust-engine-target/release/librust_diff.dylib
 ```
 
-The schema-24 baseline is four correct pairs, zero wrong pairs, 80% recall and
+The schema-25 baseline (unchanged since schema 24) is four correct pairs, zero wrong pairs, 80% recall and
 the same mapping in both directions. The changed wrapper remains unmatched;
 its primary body score is 0.158, below the current call-neighborhood gate.
 It now has a review hint for the stripped counterpart. The hint must remain

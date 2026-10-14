@@ -8,9 +8,9 @@
 #include <QtCore/QFileInfo>
 #include <QtCore/QLibrary>
 #include <QtCore/QSaveFile>
-#include <QtCore/QStandardPaths>
 
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <chrono>
 #include <cctype>
@@ -218,6 +218,64 @@ bool addressResolvesIntoImage(BinaryView* bv, uint64_t value)
 	        || !bv->GetSectionsAt(bv->GetStart() + value).empty());
 }
 
+// AArch64 builds an address from a page base and a low immediate, as in
+// `adrp x3, page` followed by `add x3, x3, #0x97`. Analysis usually records the
+// resolved address as a code reference from the second instruction; when the
+// register is consumed later instead, its value after the instruction is that
+// constant address. An immediate equal to the address's page offset is address
+// material: moving a string or global changes it without changing behavior.
+// Constants that do not form an absolute image address, including bounds and
+// masks, remain literal. Other architectures have no page-offset immediates, so
+// `mov eax, 1` and `mov eax, 2` stay a semantic change.
+static bool isResolvedPageOffset(BinaryView* bv, const ReferenceSource& source,
+    const std::vector<InstructionTextToken>& lineTokens, const InstructionTextToken& token)
+{
+	constexpr uint64_t kPageOffsetMask = 0xfff;
+	if (token.type != IntegerToken || !source.arch
+	    || source.arch->GetName().rfind("aarch64", 0) != 0)
+		return false;
+	std::optional<uint64_t> value = token.value;
+	if (*value > kPageOffsetMask)
+		value = displayedIntegerValue(token.text);
+	if (!value || *value > kPageOffsetMask)
+		return false;
+	// The target must itself be mapped. The image-relative fallback of
+	// addressResolvesIntoImage would accept a small constant as base + value,
+	// which trivially shares its own page offset.
+	auto isPageOffsetOf = [&](uint64_t target) {
+		return target > kPageOffsetMask && (target & kPageOffsetMask) == *value
+		    && (bv->GetSegmentAt(target) || !bv->GetSectionsAt(target).empty());
+	};
+	for (uint64_t target : bv->GetCodeReferencesFrom(source))
+		if (isPageOffsetOf(target))
+			return true;
+	auto destination = std::find_if(lineTokens.begin(), lineTokens.end(),
+	    [](const InstructionTextToken& candidate) { return candidate.type == RegisterToken; });
+	if (destination == lineTokens.end() || !source.func)
+		return false;
+	RegisterValue result = source.func->GetRegisterValueAfterInstruction(
+	    source.arch, source.addr, source.arch->GetRegisterByName(destination->text));
+	return result.IsConstant() && isPageOffsetOf(static_cast<uint64_t>(result.value));
+}
+
+// A database restores functions lazily. Until something requests a function's
+// IL, its disassembly omits call-target symbols, data symbols, and analysis
+// annotations, so identical code could be extracted differently depending on
+// which functions had been viewed. The caller renders while holding the
+// returned LLIL: the core frees unreferenced IL, and a later request would
+// generate it again.
+thread_local bool t_materializingFunctionAnalysis = false;
+
+static Ref<LowLevelILFunction> materializeFunctionAnalysis(Function* func)
+{
+	if (Ref<LowLevelILFunction> il = func->GetLowLevelILIfAvailable())
+		return il;
+	t_materializingFunctionAnalysis = true;
+	Ref<LowLevelILFunction> il = func->GetLowLevelIL();
+	t_materializingFunctionAnalysis = false;
+	return il;
+}
+
 bool analysisOnlyMatchToken(const InstructionTextToken& token, bool annotationSeen)
 {
 	// These token kinds are added by analysis/display and are not emitted by
@@ -405,6 +463,11 @@ FunctionMatchMaps functionMatchMapsFromJson(const json& value)
 
 }  // namespace
 
+bool materializingFunctionAnalysis()
+{
+	return t_materializingFunctionAnalysis;
+}
+
 class DiffEngine::LibraryHolder
 {
   public:
@@ -485,8 +548,10 @@ DiffEngine::DiffEngine() : m_matchCache([]() {
 }(), 64)
 {
 	// The engine is built and installed as part of this plugin. An installed UI
-	// plugin must prefer its private engine over any stale top-level legacy copy;
-	// an in-place development build should prefer the engine beside that build.
+	// plugin loads only its private engine; an in-place development build prefers
+	// the engine beside that build. Parent directories, the legacy top-level copy,
+	// and the platform search path are never searched, so a stray or planted
+	// library elsewhere cannot be loaded in place of the bundled engine.
 	std::vector<std::string> candidates;
 	auto addCandidate = [&candidates](const std::string& candidate) {
 		if (!candidate.empty()
@@ -512,29 +577,11 @@ DiffEngine::DiffEngine() : m_matchCache([]() {
 	}
 #endif
 	const bool installedPlugin = loadedDirectory == userPluginDirectory;
-	if (installedPlugin)
-		addCandidate(privateEngine);
-	if (!loadedDirectory.empty())
-	{
-		std::string dir = loadedDirectory;
-		addCandidate(dir + "/" + libraryName);
-		for (int up = 0; up < 2; up++)
-		{
-			size_t slash = dir.rfind('/');
-			if (slash == std::string::npos)
-				break;
-			dir = dir.substr(0, slash);
-			addCandidate(dir + "/" + libraryName);
-		}
-	}
+	if (!installedPlugin && !loadedDirectory.empty())
+		addCandidate(loadedDirectory + "/" + libraryName);
+	addCandidate(privateEngine);
 	if (!installedPlugin)
-		addCandidate(privateEngine);
-	addCandidate(userPluginDirectory + "/binja_diff_view/build/" + libraryName);
-	// Legacy fallback for installations made before the engine moved into its
-	// private directory. It is intentionally later than the private engine.
-	addCandidate(userPluginDirectory + "/" + libraryName);
-	// Let the platform loader search its normal paths as a final fallback.
-	addCandidate(libraryName);
+		addCandidate(userPluginDirectory + "/binja_diff_view/build/" + libraryName);
 
 	m_library = std::make_unique<LibraryHolder>();
 	std::string lastError;
@@ -606,7 +653,9 @@ std::string DiffEngine::call(JsonFn fn, const std::string& request)
 	return out;
 }
 
-static json linesToJson(const std::vector<DisassemblyTextLine>& lines,
+// `func` is non-null only for disassembly graphs, whose line addresses are
+// native instructions with code references.
+static json linesToJson(const std::vector<DisassemblyTextLine>& lines, Function* func,
     std::vector<uint64_t>& lineAddrs, std::vector<size_t>& lineInstrIndices)
 {
 	json out = json::array();
@@ -614,11 +663,43 @@ static json linesToJson(const std::vector<DisassemblyTextLine>& lines,
 	{
 		json tokens = json::array();
 		std::string text;
+		bool annotationSeen = false;
+		// In disassembly, an `adrp` page base renders as whatever symbol starts on
+		// that page, possibly as several tokens. Fold it into one address token.
+		const bool pageBase = func && !line.tokens.empty()
+		    && std::any_of(line.tokens.begin(), line.tokens.end(), [](const InstructionTextToken& token) {
+			       return token.type == InstructionToken && token.text == "adrp";
+		       });
+		bool pageOperandStarted = false;
 		for (const auto& tok : line.tokens)
 		{
-			if (tokenIgnoredForDiff(tok.type))
+			// An annotation's tail, such as the string Binary Ninja shows for an
+			// `adrp` page base, is analysis display without an operand index.
+			// Whatever string happens to start on that page differs between
+			// builds and would make identical instructions compare as changed.
+			if (tok.type == AnnotationToken)
+				annotationSeen = true;
+			if (tokenIgnoredForDiff(tok.type)
+			    || (annotationSeen && tok.operand == static_cast<size_t>(BN_INVALID_OPERAND)))
 				continue;
-			tokens.push_back({{"kind", tokenKind(tok.type)}, {"text", tok.text}});
+			if (pageBase && tok.operand == 1)
+			{
+				if (pageOperandStarted)
+				{
+					tokens.back()["text"] = tokens.back()["text"].get<std::string>() + tok.text;
+					text += tok.text;
+					continue;
+				}
+				pageOperandStarted = true;
+				tokens.push_back({{"kind", tokenKind(PossibleAddressToken)}, {"text", tok.text}});
+				text += tok.text;
+				continue;
+			}
+			const bool pageOffset = func
+			    && isResolvedPageOffset(func->GetView(),
+			        {func, func->GetArchitecture(), line.addr}, line.tokens, tok);
+			tokens.push_back({{"kind", pageOffset ? tokenKind(AddressDisplayToken) : tokenKind(tok.type)},
+			    {"text", tok.text}});
 			text += tok.text;
 		}
 		out.push_back({{"tokens", std::move(tokens)}, {"text", std::move(text)}});
@@ -684,7 +765,9 @@ std::optional<ExtractedFunction> DiffEngine::extract(
 		ExtractedBlock block;
 		block.index = i;
 		block.basicBlock = nodes[i]->GetBasicBlock();
-		json lines = linesToJson(nodes[i]->GetLines(), block.lineAddrs, block.lineInstrIndices);
+		json lines = linesToJson(nodes[i]->GetLines(),
+		    viewType.type == NormalFunctionGraph ? func.GetPtr() : nullptr, block.lineAddrs,
+		    block.lineInstrIndices);
 		block.linesJson = lines.dump();
 		block.firstAddr = block.lineAddrs.empty() ? func->GetStart() : block.lineAddrs.front();
 		for (const auto& edge : nodes[i]->GetOutgoingEdges())
@@ -831,6 +914,7 @@ static FunctionStringMap derivedStringReferences(BinaryView* bv)
 static json matchFunctionToJson(BinaryView* bv, Function* func, DisassemblySettings* settings,
 	const FunctionStringMap& derivedStrings)
 {
+	const Ref<LowLevelILFunction> analysis = materializeFunctionAnalysis(func);
 	json blocks = json::array();
 	std::set<std::string> referencedStrings;
 	if (auto found = derivedStrings.find(func->GetStart()); found != derivedStrings.end())
@@ -840,9 +924,6 @@ static json matchFunctionToJson(BinaryView* bv, Function* func, DisassemblySetti
 	{
 		json blockInstrs = json::array();
 		size_t blockInstrCount = 0;
-		ReferenceSource blockSource {func, bb->GetArchitecture(), bb->GetStart()};
-		for (uint64_t target : bv->GetCodeReferencesFrom(blockSource, bb->GetLength()))
-			addStringTarget(bv, target, referencedStrings);
 		for (auto& line : bb->GetDisassemblyText(settings))
 		{
 			std::string mnemonic;
@@ -852,11 +933,20 @@ static json matchFunctionToJson(BinaryView* bv, Function* func, DisassemblySetti
 			bool annotationSeen = false;
 			for (const auto& tok : line.tokens)
 			{
-				if (tok.type == DataSymbolToken || tok.type == PossibleAddressToken
-				    || tok.type == AddressDisplayToken || tok.type == IntegerToken)
+				// An `adrp` operand is a 4 KiB page base, not a reference: the string
+				// that happens to start on that page is unrelated to the function.
+				// The resolved address arrives through the next instruction's
+				// code reference, so `adrp` references are skipped below as well.
+				if ((tok.type == DataSymbolToken || tok.type == PossibleAddressToken
+				        || tok.type == AddressDisplayToken || tok.type == IntegerToken)
+				    && mnemonic != "adrp")
 				{
 					addStringTarget(bv, tok.value, referencedStrings);
-					if (tok.value <= UINT64_MAX - bv->GetStart())
+					// Image-relative tables point into sections. Offsets such as
+					// `[x8, #0x1c0]` would otherwise land in the Mach-O header and
+					// collect load-command strings like `/usr/lib/dyld`.
+					if (tok.value <= UINT64_MAX - bv->GetStart()
+					    && !bv->GetSectionsAt(bv->GetStart() + tok.value).empty())
 						addStringTarget(bv, bv->GetStart() + tok.value, referencedStrings);
 				}
 				if (tok.type == InstructionToken && mnemonic.empty())
@@ -896,11 +986,25 @@ static json matchFunctionToJson(BinaryView* bv, Function* func, DisassemblySetti
 						if (pointsIntoImage)
 							operandType = AddressDisplayToken;
 					}
+					else if (isResolvedPageOffset(
+					             bv, {func, bb->GetArchitecture(), line.addr}, line.tokens, tok))
+						operandType = AddressDisplayToken;
 					operandTypes.push_back(static_cast<unsigned>(operandType));
 				}
 			}
 			if (mnemonic.empty())
 				continue;  // label/annotation line
+			if (mnemonic == "adrp" && operands.size() > 1)
+			{
+				// The page base renders as whatever symbol starts on that page,
+				// possibly split into several tokens. Keep it as one address.
+				operands = json::array({operands[0], "<page>"});
+				operandTypes = json::array({operandTypes[0], static_cast<unsigned>(PossibleAddressToken)});
+			}
+			if (mnemonic != "adrp")
+				for (uint64_t target :
+				    bv->GetCodeReferencesFrom({func, bb->GetArchitecture(), line.addr}))
+					addStringTarget(bv, target, referencedStrings);
 			size_t length = bv->GetInstructionLength(bb->GetArchitecture(), line.addr);
 			// Matching consumes mnemonic and operand text. Raw bytes, instruction
 			// addresses, and per-instruction lengths were previously serialized but
@@ -950,23 +1054,56 @@ static json matchFunctionToJson(BinaryView* bv, Function* func, DisassemblySetti
 	    {"callees", callees}, {"callers", callers}, {"strings", referencedStrings}};
 }
 
+// Materializing a lazily restored function is core analysis work that runs
+// concurrently for distinct functions; one thread took minutes for a large
+// database. Workers extract whole functions so each renders while its analysis
+// is held, and results keep the function-list order.
+static std::optional<std::vector<json>> extractFunctionsInParallel(BinaryView* bv,
+    const std::vector<Ref<Function>>& functions, const FunctionStringMap& derivedStrings,
+    Ref<BackgroundTask> task, const char* side)
+{
+	std::vector<json> extracted(functions.size());
+	std::atomic<size_t> next {0}, done {0};
+	std::atomic<bool> cancelled {false};
+	const unsigned workerCount = std::clamp(std::thread::hardware_concurrency(), 1u, 8u);
+	std::vector<std::thread> workers;
+	workers.reserve(workerCount);
+	for (unsigned worker = 0; worker < workerCount; worker++)
+		workers.emplace_back([&]() {
+			Ref<DisassemblySettings> settings = new DisassemblySettings();
+			for (size_t index = next++; index < functions.size() && !cancelled; index = next++)
+			{
+				extracted[index] = matchFunctionToJson(bv, functions[index], settings, derivedStrings);
+				done++;
+			}
+		});
+	while (done < functions.size() && !cancelled)
+	{
+		if (task && task->IsCancelled())
+			cancelled = true;
+		else if (task)
+			task->SetProgressText("Binja Diff: extracting binary " + std::string(side) + " ("
+			    + std::to_string(done.load()) + "/" + std::to_string(functions.size()) + ")");
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	}
+	for (auto& worker : workers)
+		worker.join();
+	if (cancelled)
+		return std::nullopt;
+	return extracted;
+}
+
 static std::optional<std::string> extractBinaryForMatch(
     BinaryViewRef bv, Ref<BackgroundTask> task, const char* side)
 {
-	Ref<DisassemblySettings> settings = new DisassemblySettings();
 	const FunctionStringMap derivedStrings = derivedStringReferences(bv);
+	auto extracted = extractFunctionsInParallel(
+	    bv, bv->GetAnalysisFunctionList(), derivedStrings, task, side);
+	if (!extracted)
+		return std::nullopt;
 	json functions = json::array();
-	auto functionList = bv->GetAnalysisFunctionList();
-	for (size_t i = 0; i < functionList.size(); i++)
-	{
-		if (task && task->IsCancelled())
-			return std::nullopt;
-		if (task && (i % 64 == 0 || i + 1 == functionList.size()))
-			task->SetProgressText("Binja Diff: extracting binary " + std::string(side)
-			    + " (" + std::to_string(i + 1) + "/" + std::to_string(functionList.size()) + ")");
-		auto& func = functionList[i];
-		functions.push_back(matchFunctionToJson(bv, func, settings, derivedStrings));
-	}
+	for (auto& function : *extracted)
+		functions.push_back(std::move(function));
 	// Symbol and derived-string data originate in analysis plugins and may contain
 	// malformed UTF-8. Replacement encoding keeps one bad label from aborting a
 	// whole-binary match; Rust receives valid UTF-8 and the original BNDB is not
@@ -989,6 +1126,29 @@ DiffEngine::ViewKey DiffEngine::viewKey(BinaryViewRef view)
 	return {file ? file->GetSessionId() : 0, view->GetTypeName()};
 }
 
+// A raw binary is reanalyzed whenever it is opened, so its extraction depends on
+// the effective settings as well as the file bytes. A BNDB carries its saved
+// analysis and view settings, which its content digest already covers. Settings
+// outside analysis only cost a recomputation if they change.
+static std::string effectiveSettingsDigest(BinaryViewRef view)
+{
+	static constexpr std::string_view kIgnoredPrefixes[] = {
+	    "ui.", "network.", "updates.", "python.", "pluginManager.", "binjaDiffView."};
+	Ref<Settings> settings = Settings::Instance();
+	std::vector<std::string> keys = settings->Keys();
+	std::sort(keys.begin(), keys.end());
+	QCryptographicHash hash(QCryptographicHash::Sha256);
+	for (const auto& key : keys)
+	{
+		if (std::any_of(std::begin(kIgnoredPrefixes), std::end(kIgnoredPrefixes),
+		        [&key](std::string_view prefix) { return key.rfind(prefix, 0) == 0; }))
+			continue;
+		const std::string entry = key + '\0' + settings->GetJson(key, view) + '\n';
+		hash.addData(QByteArrayView(entry.data(), static_cast<qsizetype>(entry.size())));
+	}
+	return hash.result().toHex().toStdString();
+}
+
 std::optional<std::string> DiffEngine::persistentViewIdentity(BinaryViewRef view)
 {
 	if (!view)
@@ -1009,13 +1169,18 @@ std::optional<std::string> DiffEngine::persistentViewIdentity(BinaryViewRef view
 	QString path = info.canonicalFilePath();
 	if (path.isEmpty())
 		path = info.absoluteFilePath();
-	auto digest = sha256File(info);
+	// Saves and cache lookups request the same identities repeatedly on the UI
+	// thread; hash each saved file once per change rather than once per request.
+	static FileDigestMemo digests;
+	auto digest = digests.digest(file->GetSessionId(), info);
 	if (!digest)
 		return std::nullopt;
 	json identity = {{"path", path.toStdString()}, {"size", info.size()},
 	    {"mtime_ms", info.lastModified().toMSecsSinceEpoch()},
 	    {"content_sha256", digest->toStdString()},
 	    {"view_type", view->GetTypeName()}};
+	if (!file->IsBackedByDatabase(view->GetTypeName()))
+		identity["analysis_settings_sha256"] = effectiveSettingsDigest(view);
 	return identity.dump();
 }
 
@@ -1024,17 +1189,23 @@ std::optional<std::string> DiffEngine::persistentIdentity(BinaryViewRef view) co
 	return persistentViewIdentity(view);
 }
 
+// Extracted text and IL come from Binary Ninja's rendering and analysis, which
+// can change between core versions while the saved file stays byte-identical.
+static const std::string& coreCacheMaterial()
+{
+	static const std::string material = "binaryninja-core " + BinaryNinja::GetVersionString();
+	return material;
+}
+
 static std::optional<std::string> matchCachePathForIdentities(
     const std::string& identityA, const std::string& identityB)
 {
 	if (!diskCacheBudgetBytes()) return std::nullopt;
 	std::string material = directionalMatchCacheMaterial(
-	    CurrentMatchSchemaVersion, identityA, identityB);
+	    CurrentMatchSchemaVersion, identityA, identityB) + "\n" + coreCacheMaterial();
 	QByteArray digest = QCryptographicHash::hash(
 	    QByteArray::fromStdString(material), QCryptographicHash::Sha256).toHex();
-	QString root = qEnvironmentVariable("BINJA_DIFF_CACHE_ROOT");
-	if (root.isEmpty())
-		root = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+	QString root = diskCacheRoot();
 	if (root.isEmpty())
 		return std::nullopt;
 	return QDir(root).filePath("binja_diff_view/matches/" + digest + ".json").toStdString();
@@ -1044,12 +1215,11 @@ static std::optional<std::string> extractionCachePathForIdentity(const std::stri
 {
 	if (!diskCacheBudgetBytes()) return std::nullopt;
 	std::string material = "binja-diff-extraction-cache\n"
-	    + std::to_string(CurrentExtractionSchemaVersion) + "\n" + identity;
+	    + std::to_string(CurrentExtractionSchemaVersion) + "\n" + identity
+	    + "\n" + coreCacheMaterial();
 	QByteArray digest = QCryptographicHash::hash(
 	    QByteArray::fromStdString(material), QCryptographicHash::Sha256).toHex();
-	QString root = qEnvironmentVariable("BINJA_DIFF_CACHE_ROOT");
-	if (root.isEmpty())
-		root = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+	QString root = diskCacheRoot();
 	if (root.isEmpty())
 		return std::nullopt;
 	return QDir(root).filePath("binja_diff_view/extractions/" + digest + ".cache").toStdString();
@@ -1132,8 +1302,8 @@ DiffEngine::BinaryExtractionRef DiffEngine::loadPersistentBinaryExtraction(
 	}
 }
 
-void DiffEngine::storePersistentBinaryExtraction(
-    BinaryViewRef view, const std::string& extraction) const
+void DiffEngine::storePersistentBinaryExtraction(BinaryViewRef view,
+    const std::string& extraction, const PersistenceCheck& stillCurrent) const
 {
 	if (!diskCacheBudgetBytes()) return;
 	auto identity = persistentViewIdentity(view);
@@ -1152,12 +1322,13 @@ void DiffEngine::storePersistentBinaryExtraction(
 	QSaveFile file(info.absoluteFilePath());
 	if (!file.open(QIODevice::WriteOnly))
 		return;
-	if (file.write(contents) != contents.size() || !file.commit())
+	if (file.write(contents) != contents.size())
 	{
 		file.cancelWriting();
 		LogWarn("binja_diff_view: could not persist function extraction to %s", path->c_str());
 	}
-	else trimDiskCacheForArtifact(info.absoluteFilePath());
+	else if (commitIfCurrent(file, stillCurrent))
+		trimDiskCacheForArtifact(info.absoluteFilePath());
 }
 
 DiffEngine::BinaryExtractionRef DiffEngine::extractBinaryForMatchCached(
@@ -1207,7 +1378,8 @@ DiffEngine::BinaryExtractionRef DiffEngine::extractBinaryForMatchCached(
 	}
 	if (!publish)
 		return {};
-	storePersistentBinaryExtraction(view, snapshot->json);
+	storePersistentBinaryExtraction(
+	    view, snapshot->json, [this, key, epoch]() { return viewEpoch(key) == epoch; });
 	return snapshot;
 }
 
@@ -1282,8 +1454,8 @@ std::optional<FunctionMatchMaps> DiffEngine::loadPersistentFunctionMatches(
 	}
 }
 
-void DiffEngine::storePersistentFunctionMatches(
-	BinaryViewRef a, BinaryViewRef b, const FunctionMatchMaps& maps) const
+void DiffEngine::storePersistentFunctionMatches(BinaryViewRef a, BinaryViewRef b,
+	const FunctionMatchMaps& maps, const PersistenceCheck& stillCurrent) const
 {
 	if (!maps.valid || !diskCacheBudgetBytes())
 		return;
@@ -1310,12 +1482,28 @@ void DiffEngine::storePersistentFunctionMatches(
 		file.cancelWriting();
 		return;
 	}
-	if (file.write(contents) != contents.size() || !file.commit())
+	if (file.write(contents) != contents.size())
 	{
 		file.cancelWriting();
 		LogWarn("binja_diff_view: could not persist function matches to %s", path->c_str());
 	}
-	else trimDiskCacheForArtifact(info.absoluteFilePath());
+	else if (commitIfCurrent(file, stillCurrent))
+		trimDiskCacheForArtifact(info.absoluteFilePath());
+}
+
+bool DiffEngine::commitIfCurrent(QSaveFile& file, const PersistenceCheck& stillCurrent) const
+{
+	std::lock_guard<std::mutex> lock(m_matchMutex);
+	if (!stillCurrent())
+	{
+		file.cancelWriting();
+		return false;
+	}
+	if (file.commit())
+		return true;
+	LogWarn("binja_diff_view: could not commit cache artifact %s",
+	    file.fileName().toStdString().c_str());
+	return false;
 }
 
 std::optional<FunctionMatchMaps> DiffEngine::cachedFunctionMatches(
@@ -1432,29 +1620,40 @@ bool DiffEngine::persistCachedFunctionMatches(BinaryViewRef a, BinaryViewRef b) 
 		return false;
 	const MatchKey key = {viewKey(a), viewKey(b)};
 	FunctionMatchMapsRef maps;
+	uint64_t epochA = 0, epochB = 0, pairGeneration = 0;
 	{
 		std::lock_guard<std::mutex> lock(m_matchMutex);
 		maps = m_matchCache.get(key);
+		epochA = viewEpoch(key.first);
+		epochB = viewEpoch(key.second);
+		pairGeneration = pairInvalidation(key);
 	}
 	if (!maps || !maps->valid || !persistentCachePath(a, b))
 		return false;
-	storePersistentFunctionMatches(a, b, *maps);
+	storePersistentFunctionMatches(a, b, *maps, [this, key, epochA, epochB, pairGeneration]() {
+		return viewEpoch(key.first) == epochA && viewEpoch(key.second) == epochB
+		    && pairInvalidation(key) == pairGeneration;
+	});
 	return true;
 }
 
 bool DiffEngine::persistCachedBinaryExtraction(BinaryViewRef view) const
 {
-	if (!view || !persistentExtractionCachePath(view))
+	if (!view)
 		return false;
+	const ViewKey key = viewKey(view);
 	BinaryExtractionRef extraction;
+	uint64_t epoch = 0;
 	{
 		std::lock_guard<std::mutex> lock(m_matchMutex);
-		if (auto cached = m_extractionCache.get(viewKey(view)))
+		if (auto cached = m_extractionCache.get(key))
 			extraction = *cached;
+		epoch = viewEpoch(key);
 	}
-	if (!extraction)
+	if (!extraction || !persistentExtractionCachePath(view))
 		return false;
-	storePersistentBinaryExtraction(view, extraction->json);
+	storePersistentBinaryExtraction(
+	    view, extraction->json, [this, key, epoch]() { return viewEpoch(key) == epoch; });
 	return true;
 }
 
@@ -1490,6 +1689,7 @@ void DiffEngine::invalidateMatchPair(BinaryViewRef a, BinaryViewRef b)
 	{
 		std::lock_guard<std::mutex> lock(m_matchMutex);
 		m_matchCache.erase(key);
+		m_pairInvalidation[key]++;
 		// A new cache lookup must not observe the artifact between memory
 		// invalidation and removal. Already-running loads recheck the revision.
 		if (path) QFile::remove(QString::fromStdString(*path));
@@ -1529,7 +1729,7 @@ FunctionMatchMapsRef DiffEngine::matchFunctionsRef(
 		return std::make_shared<const FunctionMatchMaps>(std::move(failure));
 	}
 	if (auto cached = cachedFunctionMatchesRef(a, b)) return cached;
-	uint64_t epochA = 0, epochB = 0, cacheRevision = 0;
+	uint64_t epochA = 0, epochB = 0, cacheRevision = 0, pairGeneration = 0;
 	bool published = false;
 	{
 		std::lock_guard<std::mutex> lock(m_matchMutex);
@@ -1537,6 +1737,7 @@ FunctionMatchMapsRef DiffEngine::matchFunctionsRef(
 		cacheRevision = m_matchCache.revision();
 		epochA = m_viewEpoch[key.first];
 		epochB = m_viewEpoch[key.second];
+		pairGeneration = pairInvalidation(key);
 
 	}
 
@@ -1722,7 +1923,10 @@ FunctionMatchMapsRef DiffEngine::matchFunctionsRef(
 		}
 	}
 	if (published)
-		storePersistentFunctionMatches(a, b, *snapshot);
+		storePersistentFunctionMatches(a, b, *snapshot, [this, key, epochA, epochB, pairGeneration]() {
+			return viewEpoch(key.first) == epochA && viewEpoch(key.second) == epochB
+			    && pairInvalidation(key) == pairGeneration;
+		});
 	LogInfo("binja_diff_view: cold match timing extraction=%lld ms engine=%lld ms "
 	        "decode+persist=%lld ms total=%lld ms (request=%zu+%zu bytes, response=%zu bytes)",
 	    static_cast<long long>(extractionMs), static_cast<long long>(engineMs),

@@ -2106,30 +2106,73 @@ class CorpusWorkspace : public QWidget
 		if (!savedIndex)
 			return;
 
-		DiffEngine& engine = DiffEngine::instance();
-		engine.persistCachedBinaryExtraction(m_panes[*savedIndex].data);
-		for (size_t other = 0; other < m_panes.size(); other++)
-		{
-			if (other == *savedIndex)
-				continue;
-			if (engine.cachedFunctionMatchesRef(
-			        m_panes[*savedIndex].data, m_panes[other].data))
+		// Persisting and refreshing identities hash saved databases in full,
+		// which can take seconds for large BNDBs. Do that work off the GUI thread
+		// and apply only the newest save's identities.
+		std::vector<BinaryViewRef> views;
+		for (const auto& pane : m_panes)
+			views.push_back(pane.data);
+		const size_t saved = *savedIndex;
+		const uint64_t generation = ++m_identityGeneration;
+		using Identities = std::vector<std::optional<std::string>>;
+		auto* watcher = new QFutureWatcher<Identities>(this);
+		connect(watcher, &QFutureWatcher<Identities>::finished, this,
+		    [this, watcher, generation, saved]() {
+			watcher->deleteLater();
+			if (generation != m_identityGeneration)
+				return;
+			Identities identities;
+			try
 			{
-				engine.persistCachedFunctionMatches(
-				    m_panes[*savedIndex].data, m_panes[other].data);
-				engine.persistCachedBinaryExtraction(m_panes[other].data);
+				identities = watcher->result();
 			}
-		}
+			catch (...)
+			{
+				return;
+			}
+			applyRefreshedIdentities(identities, saved);
+		});
+		watcher->setFuture(QtConcurrent::run([views, saved]() {
+			DiffEngine& engine = DiffEngine::instance();
+			Identities identities;
+			try
+			{
+				engine.persistCachedBinaryExtraction(views[saved]);
+				for (size_t other = 0; other < views.size(); other++)
+				{
+					if (other == saved)
+						continue;
+					bool persisted = engine.persistCachedFunctionMatches(views[saved], views[other]);
+					persisted = engine.persistCachedFunctionMatches(views[other], views[saved])
+					    || persisted;
+					if (persisted)
+						engine.persistCachedBinaryExtraction(views[other]);
+				}
+			}
+			catch (const std::exception& exception)
+			{
+				LogWarn("binja_diff_view: could not refresh corpus caches after save: %s",
+				    exception.what());
+			}
+			for (const auto& view : views)
+				identities.push_back(engine.persistentIdentity(view));
+			return identities;
+		}));
+	}
 
+	void applyRefreshedIdentities(
+	    const std::vector<std::optional<std::string>>& identities, size_t savedIndex)
+	{
+		if (identities.size() != m_binaries.size())
+			return;
 		for (size_t index = 0; index < m_binaries.size(); index++)
 		{
-			auto identity = engine.persistentIdentity(m_panes[index].data);
 			FileMetadata* metadata = m_panes[index].data->GetFile();
 			size_t sessionId = metadata ? metadata->GetSessionId() : 0;
-			m_binaries[index].persistentIdentity = identity.value_or(
+			m_binaries[index].persistentIdentity = identities[index].value_or(
 			    "transient:" + std::to_string(sessionId) + ":"
 			    + m_panes[index].data->GetTypeName());
-			m_binaries[index].dirty = !identity.has_value();
+			m_binaries[index].dirty = !identities[index].has_value();
 		}
 		if (m_patchSignature)
 		{
@@ -2144,7 +2187,7 @@ class CorpusWorkspace : public QWidget
 		m_manifestPath = corpusManifestPath(identityManifest);
 		saveManifest(m_scheduler && m_scheduler->running());
 		m_details->setText(QString("Refreshed corpus caches after saving %1.")
-		    .arg(QString::fromStdString(m_binaries[*savedIndex].displayName)));
+		    .arg(QString::fromStdString(m_binaries[savedIndex].displayName)));
 	}
 
   private:
@@ -3145,6 +3188,7 @@ class CorpusWorkspace : public QWidget
 
 	std::vector<DiffWorkspacePane> m_panes;
 	CorpusScheduler* m_scheduler = nullptr;
+	uint64_t m_identityGeneration = 0;
 	Ref<BackgroundTask> m_exportTask;
 	QTimer* m_familyRebuildTimer = nullptr;
 	QFutureWatcher<std::shared_ptr<FamilyBuildResult>>* m_familyWatcher = nullptr;
@@ -3249,6 +3293,16 @@ void openCorpusWorkspace()
 		    QMessageBox::Yes | QMessageBox::Cancel) != QMessageBox::Yes)
 			return;
 	}
+	// The workspace derives each binary's persistent identity, which hashes every
+	// saved database on first use. Warm those hashes off the GUI thread.
+	std::vector<BinaryViewRef> views;
+	for (const auto& pane : panes)
+		views.push_back(pane.data);
+	if (!runPaneWorkWithProgress(context, panes, "Checking saved databases…", [views]() {
+		    for (const auto& view : views)
+			    DiffEngine::instance().persistentIdentity(view);
+	    }))
+		return;
 	auto* workspace = new CorpusWorkspace(
 	    std::move(panes), dialog.mode(), referenceIndex,
 	    dialog.referenceOverlay(), dialog.reuseCachedPairs());
