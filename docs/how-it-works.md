@@ -303,6 +303,9 @@ each function's LLIL and renders the function while holding it, so every
 function is extracted from the same analysis state. The core frees
 unreferenced IL, so a separate prefetch pass would only generate it twice. Up to
 eight workers extract functions concurrently and keep function-list order.
+If one worker throws, the pool stops and the first exception is rethrown on
+the matching task, which reports "Function matching failed: …" in both panes
+instead of terminating Binary Ninja.
 Freshly opened `screensharingd` 26.6 and 26.6.1 BNDBs (about 1,900 functions
 each) extract and match in about seven seconds.
 

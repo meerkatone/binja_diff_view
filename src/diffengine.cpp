@@ -11,10 +11,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <exception>
 #include <charconv>
 #include <chrono>
 #include <cctype>
 #include <cstdio>
+#include <mutex>
 #include <string_view>
 #include <stdexcept>
 #include <thread>
@@ -1057,7 +1059,10 @@ static json matchFunctionToJson(BinaryView* bv, Function* func, DisassemblySetti
 // Materializing a lazily restored function is core analysis work that runs
 // concurrently for distinct functions; one thread took minutes for a large
 // database. Workers extract whole functions so each renders while its analysis
-// is held, and results keep the function-list order.
+// is held, and results keep the function-list order. An exception escaping a
+// std::thread calls std::terminate and takes Binary Ninja down, so workers stop
+// the pool and the first exception is rethrown on the calling thread, where the
+// controller reports it as a matching failure.
 static std::optional<std::vector<json>> extractFunctionsInParallel(BinaryView* bv,
     const std::vector<Ref<Function>>& functions, const FunctionStringMap& derivedStrings,
     Ref<BackgroundTask> task, const char* side)
@@ -1065,18 +1070,45 @@ static std::optional<std::vector<json>> extractFunctionsInParallel(BinaryView* b
 	std::vector<json> extracted(functions.size());
 	std::atomic<size_t> next {0}, done {0};
 	std::atomic<bool> cancelled {false};
+	std::mutex failureMutex;
+	std::exception_ptr failure;
 	const unsigned workerCount = std::clamp(std::thread::hardware_concurrency(), 1u, 8u);
 	std::vector<std::thread> workers;
 	workers.reserve(workerCount);
-	for (unsigned worker = 0; worker < workerCount; worker++)
-		workers.emplace_back([&]() {
-			Ref<DisassemblySettings> settings = new DisassemblySettings();
-			for (size_t index = next++; index < functions.size() && !cancelled; index = next++)
-			{
-				extracted[index] = matchFunctionToJson(bv, functions[index], settings, derivedStrings);
-				done++;
-			}
-		});
+	auto joinAll = [&]() {
+		for (auto& worker : workers)
+			if (worker.joinable())
+				worker.join();
+	};
+	try
+	{
+		for (unsigned worker = 0; worker < workerCount; worker++)
+			workers.emplace_back([&]() {
+				try
+				{
+					Ref<DisassemblySettings> settings = new DisassemblySettings();
+					for (size_t index = next++; index < functions.size() && !cancelled; index = next++)
+					{
+						extracted[index] = matchFunctionToJson(bv, functions[index], settings, derivedStrings);
+						done++;
+					}
+				}
+				catch (...)
+				{
+					std::lock_guard<std::mutex> lock(failureMutex);
+					if (!failure)
+						failure = std::current_exception();
+					cancelled = true;
+				}
+			});
+	}
+	catch (...)
+	{
+		// Thread creation failed; joinable workers must not be destroyed.
+		cancelled = true;
+		joinAll();
+		throw;
+	}
 	while (done < functions.size() && !cancelled)
 	{
 		if (task && task->IsCancelled())
@@ -1086,8 +1118,9 @@ static std::optional<std::vector<json>> extractFunctionsInParallel(BinaryView* b
 			    + std::to_string(done.load()) + "/" + std::to_string(functions.size()) + ")");
 		std::this_thread::sleep_for(std::chrono::milliseconds(100));
 	}
-	for (auto& worker : workers)
-		worker.join();
+	joinAll();
+	if (failure)
+		std::rethrow_exception(failure);
 	if (cancelled)
 		return std::nullopt;
 	return extracted;
