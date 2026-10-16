@@ -272,3 +272,7 @@ For development checks and desktop acceptance tests, see
 [Testing](docs/testing.md).
 Earlier schema notes and validation measurements are kept in
 [Schema and validation history](docs/history.md).
+
+Authenticated ARM64 calls (`blraa`, `blrab`, `blraaz`, `blrabz`) participate in
+call recognition alongside `bl` and `blr`. Authenticated branches and returns
+remain distinct. The engine regression and all 11 CTest targets pass.

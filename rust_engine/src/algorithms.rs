@@ -290,7 +290,7 @@ pub(crate) fn is_call_mnemonic(m: &str) -> bool {
         || m == "calll"
         || m == "bl"
         || m == "blx"
-        || m == "blr"
+        || matches!(m, "blr" | "blraa" | "blrab" | "blraaz" | "blrabz")
         || m == "jal"
         || m == "jalr"
 }
@@ -1217,5 +1217,19 @@ mod tests {
             DiffAlgorithms::calculate_small_primes_product(&a, &table),
             DiffAlgorithms::calculate_small_primes_product(&c, &table)
         );
+    }
+}
+
+#[cfg(test)]
+mod authenticated_call_tests {
+    use super::is_call_mnemonic;
+    #[test]
+    fn arm64_authenticated_calls_are_calls() {
+        for mnemonic in ["blraa", "blrab", "blraaz", "blrabz"] {
+            assert!(is_call_mnemonic(mnemonic));
+        }
+        for mnemonic in ["braa", "brab", "retaa", "retab"] {
+            assert!(!is_call_mnemonic(mnemonic));
+        }
     }
 }
