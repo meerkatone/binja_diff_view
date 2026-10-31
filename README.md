@@ -5,10 +5,47 @@ functions across binaries, highlights code changes in synchronized native
 views, and provides focused workflows for reviewing a binary pair or a larger
 corpus.
 
-![A changed function in synchronized Graph diff panes, with removed code in red and added code in green](docs/images/function-graph-diff.png)
+![A changed function in synchronized Graph diff panes, with removed code in red and added code in green](https://raw.githubusercontent.com/meerkatone/binja_diff_view/refs/heads/main/docs/images/function-graph-diff.png)
 
 The graph diff shows `Dot11PacketConverterReceivePacket` in two builds of
 `nwifi.sys`. Side A is the baseline; side B is the candidate.
+
+## Install and compatibility
+
+Binja Diff View is a native C++ UI plugin with a bundled Rust matching engine.
+It is intended for a **view-only community catalog listing**, with manual
+installation from [GitHub releases](https://github.com/meerkatone/binja_diff_view/releases).
+
+The available **v0.1.3 macOS Apple Silicon** package was built for **Binary Ninja
+6.1.11052 development**, **core ABI 192**, **UI ABI 20**, and **Qt 6.11.1**.
+Other Binary Ninja builds may require rebuilding from source. The catalog's
+minimum build number does not guarantee that a prebuilt library works with
+every newer build; the native core ABI, UI ABI, and Qt version must match.
+
+1. Download the macOS ARM64 archive and `SHA256SUMS.txt` from the
+   [v0.1.3 release](https://github.com/meerkatone/binja_diff_view/releases/tag/v0.1.3).
+2. In the download directory, check its checksum:
+
+   ```sh
+   shasum -a 256 -c SHA256SUMS.txt --ignore-missing
+   ```
+
+3. Quit Binary Ninja and extract the archive. From the extracted directory, run:
+
+   ```sh
+   ditto plugins "$HOME/Library/Application Support/Binary Ninja/plugins"
+   ```
+
+4. Restart Binary Ninja. Open two analyzed binaries and use
+   **Plugins → Binja Diff View → Binja Diff: Open Workspace**.
+
+The archive includes both the native plugin and its private Rust engine;
+preserve the `plugins/` directory layout when copying it. No separate
+`rust_diff` plugin or Python dependencies are needed.
+
+Windows, Linux, and Intel macOS users must build from source using the
+[build instructions below](#build-and-install). Prebuilt packages and fresh
+installation validation for those platforms are not provided by this release.
 
 ## What it does
 
@@ -47,7 +84,7 @@ assumes changes run from A to B.
 
 ### Review the diff
 
-![The same function in Linear view with corresponding red and green changes](docs/images/function-linear-diff.png)
+![The same function in Linear view with corresponding red and green changes](https://raw.githubusercontent.com/meerkatone/binja_diff_view/refs/heads/main/docs/images/function-linear-diff.png)
 
 - Use **View → Graph diff / Linear** or press Space to switch both panes.
 - Use **IL** to change the representation shown and compared in both panes.
@@ -91,7 +128,7 @@ The first comparison of a database requests each function's analysis, because
 Binary Ninja restores functions lazily and an unvisited function otherwise
 renders without symbols. Older saved extractions and match results are
 recomputed under these rules. See the
-[matching internals](docs/how-it-works.md) for details.
+[matching internals](https://github.com/meerkatone/binja_diff_view/blob/main/docs/how-it-works.md) for details.
 
 An **Unmatched · review** row has a possible counterpart supported by a shared
 accepted caller and callee. Select the row to see the counterpart and body
@@ -139,7 +176,7 @@ vulnerable or that a change is a security fix.
 
 ## Compare a corpus
 
-![Ordered release changes across three ffmpeg builds](docs/images/corpus-changes.png)
+![Ordered release changes across three ffmpeg builds](https://raw.githubusercontent.com/meerkatone/binja_diff_view/refs/heads/main/docs/images/corpus-changes.png)
 
 1. Open at least three analyzed binaries.
 2. Select **Plugins → Binja Diff View → Binja Diff: Open Corpus Workspace**.
@@ -265,13 +302,15 @@ API path or tag is explicitly pinned; update any explicit override too. The UI
 ABI and Qt version must match as well as the core ABI. Restart Binary Ninja to
 load the replacement library.
 
-For matching internals, see [How Binja Diff View works](docs/how-it-works.md).
+For matching internals, see [How Binja Diff View works](https://github.com/meerkatone/binja_diff_view/blob/main/docs/how-it-works.md).
 For the symbol workflow and safeguards, see
-[Symbol porting](docs/symbol-porting.md).
+[Symbol porting](https://github.com/meerkatone/binja_diff_view/blob/main/docs/symbol-porting.md).
 For development checks and desktop acceptance tests, see
-[Testing](docs/testing.md).
+[Testing](https://github.com/meerkatone/binja_diff_view/blob/main/docs/testing.md).
 Earlier schema notes and validation measurements are kept in
-[Schema and validation history](docs/history.md).
+[Schema and validation history](https://github.com/meerkatone/binja_diff_view/blob/main/docs/history.md).
+For community catalog submission and release checks, see
+[Publishing](https://github.com/meerkatone/binja_diff_view/blob/main/docs/publishing.md).
 
 Authenticated ARM64 calls (`blraa`, `blrab`, `blraaz`, `blrabz`) participate in
 call recognition alongside `bl` and `blr`. Authenticated branches and returns

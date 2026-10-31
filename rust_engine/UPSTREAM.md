@@ -5,7 +5,8 @@ separate `rust_diff` Binary Ninja plugin.
 
 - Upstream: `https://github.com/meerkatone/rust_diff`
 - Imported commit: `a0e15fed66b8a6635d68e475283cf34173c0731c`
-- License: Apache-2.0; see `LICENSE`
+- License: MIT; see [`LICENSE`](LICENSE), retained from the
+  [imported upstream commit](https://github.com/meerkatone/rust_diff/blob/a0e15fed66b8a6635d68e475283cf34173c0731c/LICENSE).
 
 Only the Rust crate needed to build `librust_diff` is included. The Python
 frontend, screenshots, examples, and standalone plugin metadata are omitted.
