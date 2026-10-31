@@ -777,48 +777,52 @@ mod tests {
 
     #[test]
     fn changed_block_line_detail_preserves_function_variable_identities() {
-        let assignment = |left: &str, right: &str| {
-            line(
-                vec![
-                    tok("localVariable", left),
-                    tok("text", " = "),
-                    tok("localVariable", right),
-                ],
-                &format!("{left} = {right}"),
-            )
-        };
-        let returned = |name: &str| {
-            line(
-                vec![tok("keyword", "return"), tok("localVariable", name)],
-                &format!("return {name}"),
-            )
-        };
-        let a = func(vec![
-            block(0, vec![assignment("var_8", "var_10")], vec![1]),
-            block(1, vec![tline("cleanup()"), returned("var_8")], vec![]),
-        ]);
-        let b = func(vec![
-            block(0, vec![assignment("var_18", "var_20")], vec![1]),
-            block(1, vec![tline("cleanup()"), returned("var_20")], vec![]),
-        ]);
-        let diff = block_diff(&req(a, b));
-        assert_eq!(pair_of(&diff, 1).status, BlockStatus::Changed);
-        let detail = &diff
-            .line_diffs
-            .iter()
-            .find(|detail| detail.a == 1)
-            .unwrap()
-            .diff;
-        assert_eq!(detail.similarity, pair_of(&diff, 1).similarity);
-        assert_eq!(detail.lines[1].op, crate::il::DiffOp::Replace);
-        assert!(detail.lines[1]
-            .a_spans
-            .iter()
-            .any(|span| span.changed && span.text == "var_8"));
-        assert!(detail.lines[1]
-            .b_spans
-            .iter()
-            .any(|span| span.changed && span.text == "var_20"));
+        for (kind, names) in [
+            ("localVariable", ["var_8", "var_10", "var_18", "var_20"]),
+            ("generatedVariable", ["v1", "v2", "v2", "v3"]),
+            // Explicitly marked identities must retain their numeric suffixes.
+            ("generatedVariable", ["v1_1", "v1_2", "v2_1", "v2_2"]),
+        ] {
+            let assignment = |left: &str, right: &str| {
+                line(
+                    vec![tok(kind, left), tok("text", " = "), tok(kind, right)],
+                    &format!("{left} = {right}"),
+                )
+            };
+            let returned = |name: &str| {
+                line(
+                    vec![tok("keyword", "return"), tok(kind, name)],
+                    &format!("return {name}"),
+                )
+            };
+            let a = func(vec![
+                block(0, vec![assignment(names[0], names[1])], vec![1]),
+                block(1, vec![tline("cleanup()"), returned(names[0])], vec![]),
+            ]);
+            let b = func(vec![
+                block(0, vec![assignment(names[2], names[3])], vec![1]),
+                block(1, vec![tline("cleanup()"), returned(names[3])], vec![]),
+            ]);
+            let diff = block_diff(&req(a, b));
+            assert_eq!(pair_of(&diff, 0).status, BlockStatus::Cosmetic);
+            assert_eq!(pair_of(&diff, 1).status, BlockStatus::Changed);
+            let detail = &diff
+                .line_diffs
+                .iter()
+                .find(|detail| detail.a == 1)
+                .unwrap()
+                .diff;
+            assert_eq!(detail.similarity, pair_of(&diff, 1).similarity);
+            assert_eq!(detail.lines[1].op, crate::il::DiffOp::Replace);
+            assert!(detail.lines[1]
+                .a_spans
+                .iter()
+                .any(|span| span.changed && span.text == names[0]));
+            assert!(detail.lines[1]
+                .b_spans
+                .iter()
+                .any(|span| span.changed && span.text == names[3]));
+        }
     }
 
     #[test]

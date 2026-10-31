@@ -240,5 +240,27 @@ python3 tests/benchmark_block_pruning.py /path/to/previous/librust_diff.dylib > 
 python3 tests/benchmark_block_pruning.py /path/to/new/librust_diff.dylib > build/block-pruning-after.jsonl
 ```
 
+For large IL alignment, compare the following benchmark against both release
+libraries. It checks exact output for equal and shifted functions, a skewed
+unrelated pair, and a shifted token stream. Compare all four result digests:
+
+```sh
+python3 tests/benchmark_il_alignment.py /path/to/previous/librust_diff.dylib > build/il-alignment-before.jsonl
+python3 tests/benchmark_il_alignment.py build/rust-engine-target/release/librust_diff.dylib > build/il-alignment-after.jsonl
+```
+
+The `unrelated-skew` case exercises recursive splits at zero, which previously
+retained scoring rows in parent frames. To compare peak process memory on macOS,
+run that case in a fresh process for each library:
+
+```sh
+/usr/bin/time -l python3 tests/benchmark_il_alignment.py /path/to/library.dylib unrelated-skew
+```
+
+Process memory includes Python, JSON, and the result payload; it is broader than
+the alignment's auxiliary storage. Rust regressions separately check marked
+generated-local renumbering and cross-block alias changes, including inline
+token spans and distinct numeric suffixes.
+
 Store generated replay responses, detailed summaries, and benchmark runs under
 `build/`. They remain local and ignored by Git.

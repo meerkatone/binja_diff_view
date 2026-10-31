@@ -19,7 +19,9 @@ pub(crate) type VariableMap = HashMap<String, String>;
 
 /// One typed token of a rendered IL line. `kind` mirrors Binary Ninja's
 /// `InstructionTextToken` type name (e.g. "register", "localVariable",
-/// "integer", "codeSymbol"); unknown kinds are treated as literal text.
+/// "integer", "codeSymbol"). Other frontends can use "generatedVariable"
+/// for synthesized locals whose names should compare by first use.
+/// Unknown kinds are treated as literal text.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct IlToken {
@@ -133,6 +135,20 @@ fn generated_variable_base(text: &str) -> Option<String> {
     None
 }
 
+/// Frontends whose decompiler does not use Binary Ninja's `var_<hex>`
+/// convention (Hex-Rays numbers locals `v1`, `v2`, ...) mark analysis-generated
+/// locals with the `generatedVariable` kind instead of relying on the name.
+fn is_marked_generated_variable(tok: &IlToken) -> bool {
+    tok.kind.eq_ignore_ascii_case("generatedVariable")
+}
+
+fn generated_variable_key(tok: &IlToken) -> Option<String> {
+    if is_marked_generated_variable(tok) {
+        return Some(tok.text.trim().to_string());
+    }
+    generated_variable_base(&tok.text)
+}
+
 fn is_variable_token(tok: &IlToken) -> bool {
     let kind = tok.kind.to_ascii_lowercase();
     kind.contains("variable") || kind.contains("localvar") || kind.contains("stackvar")
@@ -147,7 +163,7 @@ pub(crate) fn variable_map_for_lines<'a>(
             if !is_variable_token(token) {
                 continue;
             }
-            let Some(base) = generated_variable_base(&token.text) else {
+            let Some(base) = generated_variable_key(token) else {
                 continue;
             };
             let next = variables.len();
@@ -159,9 +175,9 @@ pub(crate) fn variable_map_for_lines<'a>(
     variables
 }
 
-fn canonical_variable(text: &str, variable_map: &VariableMap) -> String {
-    let text = text.trim();
-    if let Some(generated) = generated_variable_base(text) {
+fn canonical_variable(tok: &IlToken, variable_map: &VariableMap) -> String {
+    let text = tok.text.trim();
+    if let Some(generated) = generated_variable_key(tok) {
         return variable_map
             .get(&generated)
             .cloned()
@@ -283,7 +299,7 @@ fn canonical_token(
     // and loosely (contains) so LLIL/MLIL/HLIL variants all collapse correctly.
     let kind = tok.kind.to_ascii_lowercase();
     if is_variable_token(tok) {
-        return canonical_variable(&tok.text, variable_map);
+        return canonical_variable(tok, variable_map);
     }
     // Binary Ninja numbers goto labels within each rendered graph. Inserting
     // one block can renumber every later target without changing the target
@@ -455,11 +471,16 @@ fn linear_memory_lcs_matches<T: Eq>(a: &[T], b: &[T]) -> Vec<(usize, usize)> {
         }
 
         let middle = a.len() / 2;
-        let left = prefix_lengths(&a[..middle], b);
-        let right = suffix_lengths(&a[middle..], b);
-        let split = (0..=b.len())
-            .max_by_key(|&j| (left[j] + right[j], std::cmp::Reverse(j)))
-            .unwrap_or(0);
+        let split = {
+            let left = prefix_lengths(&a[..middle], b);
+            let right = suffix_lengths(&a[middle..], b);
+            (0..=b.len())
+                .max_by_key(|&j| (left[j] + right[j], std::cmp::Reverse(j)))
+                .unwrap_or(0)
+        };
+        // Release both rows before descending. When split stays at zero (for
+        // example, unrelated inputs), retaining them in every parent frame
+        // would use O(b * log(a)) auxiliary memory instead of O(b).
         recurse(&a[..middle], &b[..split], offset_a, offset_b, out);
         recurse(
             &a[middle..],
@@ -1056,6 +1077,40 @@ mod tests {
                 "return testb(arg1, zx.q(arg2), arg3)",
             ),
         ]
+    }
+
+    #[test]
+    fn marked_generated_variables_renumber_cosmetically() {
+        // Hex-Rays numbers locals v1, v2, ...; inserting one local renumbers
+        // every later one. Marked generated names compare by first use, while
+        // the same names without the marker stay literal analyst identities.
+        let lines = |kind: &str, first: &str, second: &str| {
+            vec![line(
+                vec![tok(kind, first), tok("text", " = "), tok(kind, second)],
+                &format!("{first} = {second}"),
+            )]
+        };
+        let diff = |kind: &str| {
+            diff_il(&IlDiffRequest {
+                a: IlFunction {
+                    level: "Pseudocode".into(),
+                    lines: lines(kind, "v1", "v2"),
+                },
+                b: IlFunction {
+                    level: "Pseudocode".into(),
+                    lines: lines(kind, "v2", "v3"),
+                },
+                ..Default::default()
+            })
+        };
+        for kind in ["generatedVariable", "GeneratedVariable"] {
+            let result = diff(kind);
+            assert_eq!(result.similarity, 1.0);
+            assert_eq!(result.lines[0].op, DiffOp::Rename);
+            assert!(result.lines[0].a_spans.iter().all(|span| !span.changed));
+            assert!(result.lines[0].b_spans.iter().all(|span| !span.changed));
+        }
+        assert_eq!(diff("localVariable").lines[0].op, DiffOp::Replace);
     }
 
     #[test]

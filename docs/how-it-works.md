@@ -584,7 +584,9 @@ blocks. Those refinements and the whole-function IL score are returned with the
 block correspondence, avoiding additional FFI/JSON calls for every changed
 block. Ordinary line/token diffs retain the original full-matrix alignment;
 large inputs switch to exact linear-memory Hirschberg alignment rather than an
-approximate positional fallback. Independent block preprocessing and changed-pair
+approximate positional fallback. Split-scoring rows are released before recursive
+alignment, keeping auxiliary row storage linear even for unrelated inputs whose
+splits remain at one end. Independent block preprocessing and changed-pair
 line diffs run in parallel; the whole-function score is computed alongside them.
 
 Block status also compares outgoing CFG targets through the completed block
@@ -600,6 +602,15 @@ block therefore remains visible in the inline highlights. Meaningful variable
 names retain numeric suffixes; generated argument indices remain distinct,
 while recognized generated duplicate suffixes stay cosmetic. Patch-signature
 schema 16 rejects signatures computed before these fixes.
+
+The Rust IL and block JSON endpoints also accept `generatedVariable` tokens
+(case-insensitive) from other frontends. Each distinct trimmed name receives a
+function-wide identity in first-use order, so `v1 = v2` and `v2 = v3` compare
+cosmetically. Reusing a different established variable remains a real change,
+including across blocks. Marked names retain their full numeric suffixes as
+distinct identities. Frontends must mark only synthesized locals; ordinary
+`localVariable` names such as `v1` and `v2` remain literal. The native extractor
+continues to use Binary Ninja's recognized `var_<hex>` naming convention.
 
 | Graph color | Meaning |
 |---|---|
