@@ -124,6 +124,11 @@ struct CorpusPairMetrics
 	std::map<std::string, size_t> matchesByMethod;
 };
 
+// The engine reports whether a matched pair's content changed. Records without
+// that field fall back to one near-identity threshold. Every corpus metric,
+// family, lineage, transition, and matrix count uses this single rule.
+bool matchContentUnchanged(const std::string& contentMatch, double similarity);
+
 CorpusPairMetrics calculateCorpusMetrics(size_t sourceFunctionCount,
 	size_t targetFunctionCount, size_t sourceInstructionCount,
 	size_t targetInstructionCount, const std::vector<CorpusMatchSample>& matches,

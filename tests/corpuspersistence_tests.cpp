@@ -198,6 +198,49 @@ int main()
 		check(formulaFile.readAll().contains(QByteArray::fromStdString("\"'" + prefix + "1+1\"")));
 	}
 
+	// Names and changed-line text come from the analysed binaries and may hold
+	// bytes that are not UTF-8. Saving runs in GUI-thread slots, so it must not
+	// throw; the manifest and both exports substitute U+FFFD and stay loadable.
+	{
+		const std::string malformed = "caf\xe9_handler";
+		const std::string replaced = "caf\xef\xbf\xbd_handler";
+		CorpusManifest malformedManifest = manifest;
+		malformedManifest.patchSignature->vulnerable.name = malformed;
+		malformedManifest.patchSignature->changedLines[0].vulnerableText = malformed;
+		malformedManifest.patchSignature->changedCallTargets.push_back("removed: " + malformed);
+		std::string malformedPath = temporary.filePath("malformed-manifest.json").toStdString();
+		bool saved = false;
+		try
+		{
+			saved = saveCorpusManifest(malformedPath, malformedManifest, &error);
+		}
+		catch (...)
+		{
+			check(!"saveCorpusManifest threw on a malformed name");
+		}
+		check(saved);
+		auto malformedRestored = loadCorpusManifest(malformedPath, &error);
+		check(malformedRestored.has_value());
+		check(malformedRestored->patchSignature.has_value());
+		check(malformedRestored->patchSignature->vulnerable.name == replaced);
+		check(malformedRestored->patchSignature->changedLines[0].vulnerableText == replaced);
+
+		FunctionFamily malformedFamily = family;
+		malformedFamily.members[1].name = malformed;
+		malformedFamily.acceptedLinks[0].source.name = malformed;
+		std::string malformedJson = temporary.filePath("malformed.json").toStdString();
+		std::string malformedCsv = temporary.filePath("malformed.csv").toStdString();
+		check(exportCorpusJson(malformedJson, malformedManifest, pairs, {malformedFamily}, &error));
+		check(exportCorpusCsv(malformedCsv, malformedManifest, pairs, {malformedFamily}, &error));
+		QFile malformedExport(QString::fromStdString(malformedJson));
+		check(malformedExport.open(QIODevice::ReadOnly));
+		auto malformedParsed = nlohmann::json::parse(
+		    malformedExport.readAll().toStdString(), nullptr, false);
+		check(malformedParsed.is_object());
+		check(malformedParsed.at("families")[0].at("members")[0].at("name") == replaced);
+		check(malformedParsed.at("patch_signature").at("vulnerable").at("name") == replaced);
+	}
+
 	PatchSignature guardedCopy;
 	guardedCopy.vulnerable = {1, 0x4000, "parse_request", 10};
 	guardedCopy.fixed = {2, 0x5000, "parse_request", 12};

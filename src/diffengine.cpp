@@ -28,6 +28,7 @@
 #include "nlohmann/json.hpp"
 #include "diffmodel.h"
 #include "diskcache.h"
+#include "jsontext.h"
 
 using namespace BinaryNinja;
 using json = nlohmann::json;
@@ -770,7 +771,7 @@ std::optional<ExtractedFunction> DiffEngine::extract(
 		json lines = linesToJson(nodes[i]->GetLines(),
 		    viewType.type == NormalFunctionGraph ? func.GetPtr() : nullptr, block.lineAddrs,
 		    block.lineInstrIndices);
-		block.linesJson = lines.dump();
+		block.linesJson = dumpBinaryDerivedJson(lines);
 		block.firstAddr = block.lineAddrs.empty() ? func->GetStart() : block.lineAddrs.front();
 		for (const auto& edge : nodes[i]->GetOutgoingEdges())
 		{
@@ -1141,7 +1142,7 @@ static std::optional<std::string> extractBinaryForMatch(
 	// malformed UTF-8. Replacement encoding keeps one bad label from aborting a
 	// whole-binary match; Rust receives valid UTF-8 and the original BNDB is not
 	// modified.
-	return functions.dump(-1, ' ', false, json::error_handler_t::replace);
+	return dumpBinaryDerivedJson(functions);
 }
 
 static std::string hexAddr(uint64_t addr)
@@ -1509,7 +1510,7 @@ void DiffEngine::storePersistentFunctionMatches(BinaryViewRef a, BinaryViewRef b
 	QSaveFile file(info.absoluteFilePath());
 	if (!file.open(QIODevice::WriteOnly))
 		return;
-	QByteArray contents = QByteArray::fromStdString(root.dump());
+	QByteArray contents = QByteArray::fromStdString(dumpBinaryDerivedJson(root));
 	if (static_cast<uint64_t>(contents.size()) > diskCacheBudgetBytes())
 	{
 		file.cancelWriting();
@@ -2045,7 +2046,7 @@ std::optional<BlockDiffResult> DiffEngine::blockDiff(const ExtractedFunction& a,
 	json request = {{"a", functionToJson(a)}, {"b", functionToJson(b)},
 	    {"rename_map", maps.renameMap}, {"addr_map", maps.addrMap},
 	    {"threshold", threshold}};
-	std::string response = call(m_blockDiff, request.dump());
+	std::string response = call(m_blockDiff, dumpBinaryDerivedJson(request));
 	if (response.empty())
 		return std::nullopt;
 
@@ -2117,7 +2118,7 @@ std::optional<LineDiff> DiffEngine::lineDiff(const ExtractedBlock& a, const Extr
 	    {"rename_map", maps.renameMap},
 	    {"addr_map", maps.addrMap},
 	};
-	std::string response = call(m_ilDiff, request.dump());
+	std::string response = call(m_ilDiff, dumpBinaryDerivedJson(request));
 	if (response.empty())
 		return std::nullopt;
 	try
@@ -2159,7 +2160,7 @@ std::optional<double> DiffEngine::ilSimilarity(const ExtractedFunction& a, const
 	    {"rename_map", maps.renameMap},
 	    {"addr_map", maps.addrMap},
 	};
-	std::string response = call(m_ilDiff, request.dump());
+	std::string response = call(m_ilDiff, dumpBinaryDerivedJson(request));
 	if (response.empty())
 		return std::nullopt;
 	try

@@ -420,7 +420,7 @@ QString DiffController::prepareFunctionMatches(ViewFrame* frame)
 	DiffViewContainer* partner = findPartner(pane);
 	if (!partner)
 		return "The paired Binja Diff pane is not ready yet.";
-	auto cached = engine.cachedFunctionMatches(pane->data(), partner->data());
+	auto cached = engine.cachedFunctionMatchesRef(pane->data(), partner->data());
 	if (cached && cached->valid)
 		return "Function matches are ready.";
 	beginFunctionMatch(pane, partner);
@@ -560,7 +560,7 @@ QString DiffController::activateLinearMatch(
 		return "Switch both panes to Linear before opening a linear diff.";
 
 	pairFrames(left, right);
-	if (!DiffEngine::instance().cachedFunctionMatches(paneA->data(), paneB->data()))
+	if (!DiffEngine::instance().cachedFunctionMatchesRef(paneA->data(), paneB->data()))
 	{
 		uint64_t generation = ++m_activationGeneration;
 		beginFunctionMatch(paneA, paneB);
@@ -599,7 +599,7 @@ void DiffController::finishLinearMatchWhenReady(QPointer<DiffViewContainer> pane
 	if (generation != m_activationGeneration || !paneA || !paneB
 	    || !m_panes.count(paneA) || !m_panes.count(paneB))
 		return;
-	if (DiffEngine::instance().cachedFunctionMatches(paneA->data(), paneB->data()))
+	if (DiffEngine::instance().cachedFunctionMatchesRef(paneA->data(), paneB->data()))
 	{
 		QString status = activateLinearMatch(
 		    paneA->frame(), paneB->frame(), addressA, addressB);
@@ -669,7 +669,7 @@ SymbolPortPlan DiffController::planSymbolPort(ViewFrame* left, ViewFrame* right,
 	DiffViewContainer* paneB = paneForFrame(right);
 	if (!paneA || !paneB || selectedA.empty())
 		return {};
-	auto maps = DiffEngine::instance().cachedFunctionMatches(paneA->data(), paneB->data());
+	auto maps = DiffEngine::instance().cachedFunctionMatchesRef(paneA->data(), paneB->data());
 	if (!maps || !maps->valid)
 		return {};
 

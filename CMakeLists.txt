@@ -482,6 +482,10 @@ if(BUILD_TESTING)
 	target_link_libraries(binja_diff_token_emphasis_tests PRIVATE binaryninjaapi)
 	add_test(NAME binja_diff_token_emphasis_tests COMMAND binja_diff_token_emphasis_tests)
 	set_tests_properties(binja_diff_token_emphasis_tests PROPERTIES LABELS "unit")
+	add_executable(binja_diff_json_text_tests tests/jsontext_tests.cpp)
+	target_include_directories(binja_diff_json_text_tests PRIVATE src ${BN_API_PATH}/vendor)
+	add_test(NAME binja_diff_json_text_tests COMMAND binja_diff_json_text_tests)
+	set_tests_properties(binja_diff_json_text_tests PROPERTIES LABELS "unit")
 	add_executable(binja_diff_export_benchmark EXCLUDE_FROM_ALL
 		tests/export_benchmark.cpp src/corpuspersistence.cpp
 		src/corpusmodel.cpp src/securityrelevance.cpp)

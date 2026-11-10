@@ -427,8 +427,37 @@ static void testBinaryCountsFromPairSnapshots()
 	check(binaries[3].instructionCount == 123);
 }
 
+static void testUnchangedContentRuleIsShared()
+{
+	// The engine's verdict wins whenever it is present.
+	check(matchContentUnchanged("Exact", 0.5));
+	check(matchContentUnchanged("Cosmetic", 0.5));
+	check(!matchContentUnchanged("Changed", 1.0));
+	// Records without the field use one threshold everywhere. Lineage and
+	// transition cells previously accepted 0.999 while families required 0.9995,
+	// so one link could be "identical" in one tab and "changed" in another.
+	check(matchContentUnchanged("", 0.9995));
+	check(!matchContentUnchanged("", 0.9992));
+
+	FunctionOccurrence before {1, 0x1000, "f", 10};
+	FunctionOccurrence after {2, 0x2000, "f", 10};
+	FunctionFamily family;
+	family.members[1] = before;
+	family.members[2] = after;
+	family.acceptedLinks.push_back({before, after, 0.9992, 1.0, "Structural", {1, 2}, ""});
+	std::vector<FunctionFamily> families = buildConstrainedFamilies(CorpusMode::Lineage,
+	    {1, 2}, {{{1, 2}, family.acceptedLinks, {}, {}}});
+	check(families.size() == 1);
+	check(families[0].state == FunctionFamilyState::Changed);
+	check(classifyFunctionLineage(families[0], {1, 2}, 1).state
+	    == FunctionLineageState::Changed);
+	check(classifyFunctionTransition(families[0], {1, 2}, 0).state
+	    == FunctionTransitionState::Modified);
+}
+
 int main()
 {
+	testUnchangedContentRuleIsShared();
 	testNaturalReleaseOrdering();
 	testReferencePlan();
 	testLineagePlan();

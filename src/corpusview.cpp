@@ -413,7 +413,7 @@ class CorpusMatrixModel : public QAbstractTableModel
 		std::map<CorpusEdgeKey, std::set<FunctionFamilyId>> changed;
 		for (const auto& family : families)
 			for (const auto& link : family.acceptedLinks)
-				if (link.similarity < 1.0)
+				if (!matchContentUnchanged(link.contentMatch, link.similarity))
 					changed[link.origin].insert(family.id);
 		for (const auto& [edge, ids] : changed)
 			m_changedFamilies[edge] = ids.size();
@@ -2391,6 +2391,8 @@ class CorpusWorkspace : public QWidget
 		auto vulnerablePane = currentlyOpen(m_patchSignature->vulnerable.binary);
 		auto fixedPane = currentlyOpen(m_patchSignature->fixed.binary);
 		std::map<CorpusBinaryId, PatchClassification> classifications;
+		// The anchor views are fixed for this pass, so extract each anchor once.
+		PatchAnchorCache anchors;
 		for (CorpusBinaryId binary : m_order)
 		{
 			auto occurrence = family->members.find(binary);
@@ -2401,7 +2403,7 @@ class CorpusWorkspace : public QWidget
 			    vulnerablePane ? vulnerablePane->data : BinaryViewRef {},
 			    fixedPane ? fixedPane->data : BinaryViewRef {},
 			    targetPane ? targetPane->data : BinaryViewRef {}, target,
-			    m_patchMinimumMargin, m_patchMinimumCoverage);
+			    m_patchMinimumMargin, m_patchMinimumCoverage, &anchors);
 			classification.binary = binary;
 			classifications[binary] = std::move(classification);
 		}

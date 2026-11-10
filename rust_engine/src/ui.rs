@@ -111,22 +111,26 @@ fn generate_report_with_colors(diff_result: &DiffResult, c: &ReportColors) -> St
         "{}{}MATCH TYPE BREAKDOWN:{}\n",
         c.bold, c.label, c.reset
     ));
-    report.push_str(&format!(
-        "  Exact Matches: {}\n",
-        match_counts.get(&MatchType::Exact).unwrap_or(&0)
-    ));
-    report.push_str(&format!(
-        "  Structural Matches: {}\n",
-        match_counts.get(&MatchType::Structural).unwrap_or(&0)
-    ));
-    report.push_str(&format!(
-        "  Heuristic Matches: {}\n",
-        match_counts.get(&MatchType::Heuristic).unwrap_or(&0)
-    ));
-    report.push_str(&format!(
-        "  Manual Matches: {}\n\n",
-        match_counts.get(&MatchType::Manual).unwrap_or(&0)
-    ));
+    // One line per matching phase, so the counts add up to Total Matches.
+    // Listing only four of the eight types silently dropped name, MD-index,
+    // small-primes and call-graph matches from the breakdown.
+    for (label, match_type) in [
+        ("Exact", MatchType::Exact),
+        ("Name", MatchType::Name),
+        ("MD-Index", MatchType::MdIndex),
+        ("Small-Primes", MatchType::SmallPrimes),
+        ("Structural", MatchType::Structural),
+        ("Call-Graph", MatchType::CallGraph),
+        ("Heuristic", MatchType::Heuristic),
+        ("Manual", MatchType::Manual),
+    ] {
+        report.push_str(&format!(
+            "  {} Matches: {}\n",
+            label,
+            match_counts.get(&match_type).unwrap_or(&0)
+        ));
+    }
+    report.push('\n');
 
     // Detailed matches
     report.push_str(&format!(
@@ -187,10 +191,11 @@ fn generate_report_with_colors(diff_result: &DiffResult, c: &ReportColors) -> St
             m.function_a.basic_blocks.len(),
             m.function_b.basic_blocks.len()
         ));
+        // Result functions are slimmed: their instruction lists are empty
+        // and the count lives in `instruction_count`.
         report.push_str(&format!(
             "   Instructions: {} <-> {}\n\n",
-            m.function_a.instructions.len(),
-            m.function_b.instructions.len()
+            m.function_a.instruction_count, m.function_b.instruction_count
         ));
     }
 
@@ -226,6 +231,18 @@ fn count_match_types(matches: &[FunctionMatch]) -> HashMap<MatchType, usize> {
     counts
 }
 
+/// Shorten a name to the table's 28-character column. Counts characters, not
+/// bytes: slicing a demangled or non-ASCII name at byte 25 panicked when that
+/// byte was inside a multi-byte character.
+fn table_name(name: &str) -> String {
+    if name.chars().count() > 28 {
+        let head: String = name.chars().take(25).collect();
+        format!("{head}...")
+    } else {
+        name.to_string()
+    }
+}
+
 impl DiffUI {
     /// Generate a plain text diff report
     pub fn generate_text_report(diff_result: &DiffResult) -> String {
@@ -243,9 +260,12 @@ impl DiffUI {
             return String::new();
         }
 
-        let progress = (current as f64 / total as f64) * width as f64;
-        let filled = "█".repeat(progress as usize);
-        let empty = "░".repeat(width - progress as usize);
+        // `current` can overshoot `total` when work is discovered late; an
+        // unclamped bar underflowed `width - filled` and panicked.
+        let fraction = (current as f64 / total as f64).clamp(0.0, 1.0);
+        let filled_cells = ((fraction * width as f64) as usize).min(width);
+        let filled = "█".repeat(filled_cells);
+        let empty = "░".repeat(width - filled_cells);
 
         format!(
             "[{}{}] {}/{} ({:.1}%)",
@@ -292,27 +312,19 @@ impl DiffUI {
                 (Some(a), Some(b)) => {
                     viz.push_str(&format!(
                         "  Block {}: 0x{:x} ({} instrs) | 0x{:x} ({} instrs)\n",
-                        i,
-                        a.address,
-                        a.instructions.len(),
-                        b.address,
-                        b.instructions.len()
+                        i, a.address, a.instruction_count, b.address, b.instruction_count
                     ));
                 }
                 (Some(a), None) => {
                     viz.push_str(&format!(
                         "  Block {}: 0x{:x} ({} instrs) | <missing>\n",
-                        i,
-                        a.address,
-                        a.instructions.len()
+                        i, a.address, a.instruction_count
                     ));
                 }
                 (None, Some(b)) => {
                     viz.push_str(&format!(
                         "  Block {}: <missing> | 0x{:x} ({} instrs)\n",
-                        i,
-                        b.address,
-                        b.instructions.len()
+                        i, b.address, b.instruction_count
                     ));
                 }
                 (None, None) => break,
@@ -322,11 +334,11 @@ impl DiffUI {
         viz.push_str("\nInstruction Statistics:\n");
         viz.push_str(&format!(
             "  Function A: {} instructions\n",
-            match_result.function_a.instructions.len()
+            match_result.function_a.instruction_count
         ));
         viz.push_str(&format!(
             "  Function B: {} instructions\n",
-            match_result.function_b.instructions.len()
+            match_result.function_b.instruction_count
         ));
         viz.push_str(&format!(
             "  Complexity A: {}\n",
@@ -351,17 +363,8 @@ impl DiffUI {
         table.push_str("├─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤\n");
 
         for m in matches {
-            let func_a_name = if m.function_a.name.len() > 28 {
-                format!("{}...", &m.function_a.name[..25])
-            } else {
-                m.function_a.name.clone()
-            };
-
-            let func_b_name = if m.function_b.name.len() > 28 {
-                format!("{}...", &m.function_b.name[..25])
-            } else {
-                m.function_b.name.clone()
-            };
+            let func_a_name = table_name(&m.function_a.name);
+            let func_b_name = table_name(&m.function_b.name);
 
             table.push_str(&format!(
                 "│ {:<29} │ {:<29} │ {:<10.4} │ {:<10.4} │ {:<10?} │ {:<6} │ {:<6} │ {:<4} │ {:<4} │\n",
@@ -380,5 +383,100 @@ impl DiffUI {
         table.push_str("└─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘\n");
 
         table
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{BasicBlockInfo, BinaryDiffEngine, FunctionInfo, InstructionInfo};
+
+    fn function(name: &str, address: u64) -> FunctionInfo {
+        let instructions: Vec<InstructionInfo> = ["push", "mov", "add", "pop", "ret"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, mnemonic)| InstructionInfo {
+                address: address + index as u64,
+                mnemonic: mnemonic.into(),
+                length: 1,
+                ..Default::default()
+            })
+            .collect();
+        FunctionInfo {
+            name: name.into(),
+            address,
+            size: 5,
+            basic_blocks: vec![BasicBlockInfo {
+                address,
+                size: 5,
+                instructions,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn diff_result() -> DiffResult {
+        let a = vec![function("parse_header", 0x1000)];
+        let b = vec![function("parse_header", 0x2000)];
+        BinaryDiffEngine::new()
+            .perform_diff_json(
+                &serde_json::to_string(&a).unwrap(),
+                &serde_json::to_string(&b).unwrap(),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn reports_use_the_counts_kept_on_slimmed_result_functions() {
+        let result = diff_result();
+        let [matched] = result.matched_functions.as_slice() else {
+            panic!("expected one match");
+        };
+        // The engine drops instruction payloads from results.
+        assert!(matched.function_a.instructions.is_empty());
+        let report = DiffUI::generate_text_report(&result);
+        assert!(report.contains("Instructions: 5 <-> 5"), "{report}");
+        let visualization = DiffUI::generate_diff_visualization(matched);
+        assert!(visualization.contains("(5 instrs)"), "{visualization}");
+        assert!(visualization.contains("Function A: 5 instructions"));
+    }
+
+    #[test]
+    fn match_type_breakdown_accounts_for_every_match() {
+        let result = diff_result();
+        let report = DiffUI::generate_text_report(&result);
+        let listed: usize = report
+            .lines()
+            .filter_map(|line| line.trim().split_once(" Matches: "))
+            .filter(|(label, _)| *label != "Total")
+            .map(|(_, count)| count.parse::<usize>().unwrap())
+            .sum();
+        assert_eq!(listed, result.matched_functions.len());
+        assert!(report.contains("Name Matches: ") && report.contains("Call-Graph Matches: "));
+    }
+
+    #[test]
+    fn summary_table_truncates_non_ascii_names_without_panicking() {
+        let mut matched = FunctionMatch::default();
+        // 30 two-byte characters: byte 25 falls inside a character.
+        matched.function_a.name = "é".repeat(30);
+        matched.function_b.name = "short".into();
+        let table = DiffUI::generate_summary_table(&[matched]);
+        assert!(table.contains(&format!("{}...", "é".repeat(25))));
+        assert!(table.contains("short"));
+        assert_eq!(table_name(&"x".repeat(28)), "x".repeat(28));
+    }
+
+    #[test]
+    fn progress_bar_is_clamped_to_its_width() {
+        assert_eq!(DiffUI::generate_progress_bar(0, 0, 10), "");
+        let half = DiffUI::generate_progress_bar(5, 10, 10);
+        assert_eq!(half.matches('█').count(), 5);
+        assert_eq!(half.matches('░').count(), 5);
+        let over = DiffUI::generate_progress_bar(15, 10, 10);
+        assert_eq!(over.matches('█').count(), 10);
+        assert_eq!(over.matches('░').count(), 0);
+        assert!(over.contains("15/10"));
     }
 }

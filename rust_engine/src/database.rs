@@ -198,8 +198,9 @@ impl DatabaseManager {
                 match_result.function_b.size,
                 match_result.function_a.basic_blocks.len(),
                 match_result.function_b.basic_blocks.len(),
-                match_result.function_a.instructions.len(),
-                match_result.function_b.instructions.len()
+                // Result functions are slimmed; `instructions` is empty here.
+                match_result.function_a.instruction_count,
+                match_result.function_b.instruction_count
             ));
         }
 
@@ -265,8 +266,9 @@ impl DatabaseManager {
 </body>
 </html>
 "#,
-            database.metadata.plugin_version,
-            database.metadata.created_at,
+            // A loaded database is untrusted input, including its metadata.
+            html_escape(&database.metadata.plugin_version),
+            html_escape(&database.metadata.created_at),
             html_escape(&database.binary_a_path),
             html_escape(&database.binary_b_path),
             database.metadata.total_functions_a,
@@ -395,5 +397,98 @@ impl DiffStatistics {
         println!("Average Confidence: {:.4}", self.average_confidence);
         println!("Unmatched Functions A: {}", self.unmatched_functions_a);
         println!("Unmatched Functions B: {}", self.unmatched_functions_b);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{BasicBlockInfo, BinaryDiffEngine, InstructionInfo};
+
+    fn function(name: &str, address: u64) -> FunctionInfo {
+        let instructions: Vec<InstructionInfo> = ["push", "mov", "add", "pop", "ret"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, mnemonic)| InstructionInfo {
+                address: address + index as u64,
+                mnemonic: mnemonic.into(),
+                length: 1,
+                ..Default::default()
+            })
+            .collect();
+        FunctionInfo {
+            name: name.into(),
+            address,
+            size: 5,
+            basic_blocks: vec![BasicBlockInfo {
+                address,
+                size: 5,
+                instructions,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn database(created_at: &str) -> DiffDatabase {
+        let a = vec![function("it's_parse", 0x1000)];
+        let b = vec![function("it's_parse", 0x2000)];
+        let result = BinaryDiffEngine::new()
+            .perform_diff_json(
+                &serde_json::to_string(&a).unwrap(),
+                &serde_json::to_string(&b).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(result.matched_functions.len(), 1);
+        DiffDatabase {
+            binary_a_path: "a.bin".into(),
+            binary_b_path: "b.bin".into(),
+            functions_a: Vec::new(),
+            functions_b: Vec::new(),
+            matches: result.matched_functions,
+            metadata: DatabaseMetadata {
+                created_at: created_at.into(),
+                plugin_version: "<b>1</b>".into(),
+                binary_a_hash: String::new(),
+                binary_b_hash: String::new(),
+                total_functions_a: 1,
+                total_functions_b: 1,
+                total_matches: 1,
+                analysis_time_seconds: 0.0,
+            },
+        }
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("rust_diff_{}_{name}", std::process::id()))
+    }
+
+    #[test]
+    fn sql_and_csv_exports_agree_on_instruction_counts() {
+        let database = database("now");
+        let (sql_path, csv_path) = (scratch("export.sql"), scratch("export.csv"));
+        DatabaseManager::export_to_sql_script(&database, &sql_path).unwrap();
+        DatabaseManager::export_to_csv(&database, &csv_path).unwrap();
+        let sql = fs::read_to_string(&sql_path).unwrap();
+        let csv = fs::read_to_string(&csv_path).unwrap();
+        fs::remove_file(sql_path).unwrap();
+        fs::remove_file(csv_path).unwrap();
+        // size, size, blocks, blocks, instructions, instructions
+        assert!(sql.contains(", 5, 5, 1, 1, 5, 5);"), "{sql}");
+        assert!(csv.trim_end().ends_with(",5,5,1,1,5,5"), "{csv}");
+        assert!(sql.contains("'it''s_parse'"));
+    }
+
+    #[test]
+    fn html_export_escapes_loaded_metadata() {
+        let database = database("<script>alert(1)</script>");
+        let path = scratch("export.html");
+        DatabaseManager::export_to_html(&database, &path).unwrap();
+        let html = fs::read_to_string(&path).unwrap();
+        fs::remove_file(path).unwrap();
+        assert!(!html.contains("<script>"));
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(html.contains("v&lt;b&gt;1&lt;/b&gt;"));
+        assert!(html.contains("it&#39;s_parse"));
     }
 }

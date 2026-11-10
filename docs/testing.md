@@ -27,7 +27,7 @@ cmake --build build --target \
   binja_diff_corpus_persistence_tests binja_diff_corpus_metrics_tests \
   binja_diff_weighted_cache_tests binja_diff_disk_cache_tests \
   binja_diff_shared_result_cache_tests binja_diff_keyed_work_gate_tests \
-  binja_diff_token_emphasis_tests
+  binja_diff_token_emphasis_tests binja_diff_json_text_tests
 ctest --test-dir build -L unit --output-on-failure
 ```
 
@@ -61,7 +61,17 @@ desktop check with corpus drill-down and more than one open result panel.
 The diff-model tests check forward and reverse counterpart lookup when addresses
 overlap across binaries. Corpus-model tests check that raw function/instruction
 totals follow binary IDs and pair direction, and that repeated publications or
-multiple edges replace totals rather than accumulate them.
+multiple edges replace totals rather than accumulate them. They also check
+that family, lineage, and transition cells apply one rule for an unchanged
+match: the engine's content state when present, otherwise similarity of at
+least 0.9995.
+
+The JSON-text test checks the serializer used for every document that
+carries names or token text. A byte sequence that is not valid UTF-8 must be
+written as U+FFFD without throwing, the result must parse and serialize
+again unchanged, and valid multi-byte text must be byte-identical to the
+default serializer's output. The persistence tests save, reload, and export
+a manifest whose function and binary names contain such bytes.
 
 For selected-function rendering or patch-signature changes, build the relevant
 native tests and run only those checks:

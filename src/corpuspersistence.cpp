@@ -14,6 +14,7 @@
 #include <stdexcept>
 
 #include "diskcache.h"
+#include "jsontext.h"
 #include "nlohmann/json.hpp"
 
 using json = nlohmann::json;
@@ -473,11 +474,22 @@ std::optional<std::string> corpusManifestPath(const CorpusManifest& manifest)
 bool saveCorpusManifest(const std::string& path, const CorpusManifest& manifest,
 	std::string* error)
 {
-	QByteArray payload = QByteArray::fromStdString(manifestPayload(manifest).dump());
-	json envelope = {{"magic", kManifestMagic},
-	    {"sha256", QCryptographicHash::hash(payload, QCryptographicHash::Sha256)
-	        .toHex().toStdString()}, {"payload", json::parse(payload.constData())}};
-	return saveBytes(path, QByteArray::fromStdString(envelope.dump(2)), error);
+	// Called from GUI-thread slots, so serialization must never throw. Function
+	// names and changed-line text originate in the analysed binaries.
+	try
+	{
+		QByteArray payload = QByteArray::fromStdString(
+		    dumpBinaryDerivedJson(manifestPayload(manifest)));
+		json envelope = {{"magic", kManifestMagic},
+		    {"sha256", QCryptographicHash::hash(payload, QCryptographicHash::Sha256)
+		        .toHex().toStdString()}, {"payload", json::parse(payload.constData())}};
+		return saveBytes(path, QByteArray::fromStdString(envelope.dump(2)), error);
+	}
+	catch (const std::exception& exception)
+	{
+		if (error) *error = exception.what();
+		return false;
+	}
 }
 
 std::optional<CorpusManifest> loadCorpusManifest(const std::string& path,
@@ -514,7 +526,7 @@ bool exportCorpusJson(const std::string& path, const CorpusManifest& manifest,
 		json root = manifestPayload(manifest);
 		output << "{\n";
 		for (auto field = root.begin(); field != root.end(); ++field)
-			output << json(field.key()) << ": " << std::setw(2) << field.value() << ",\n";
+			output << json(field.key()) << ": " << dumpBinaryDerivedJson(field.value(), 2) << ",\n";
 		output << "\"pair_results\": [";
 		bool first = true;
 		for (const auto& [edge, pair] : pairs)
@@ -532,7 +544,7 @@ bool exportCorpusJson(const std::string& path, const CorpusManifest& manifest,
 			}
 			if (!first) output << ",";
 			first = false;
-			output << "\n" << std::setw(2) << value;
+			output << "\n" << dumpBinaryDerivedJson(value, 2);
 		}
 		output << "\n],\n\"families\": [";
 		first = true;
@@ -556,7 +568,7 @@ bool exportCorpusJson(const std::string& path, const CorpusManifest& manifest,
 			    {"minimum_similarity", family.minimumSimilarity},
 			    {"minimum_confidence", family.minimumConfidence},
 			    {"accepted_links", std::move(accepted)}, {"rejected_links", std::move(rejected)}};
-			output << "\n" << std::setw(2) << value;
+			output << "\n" << dumpBinaryDerivedJson(value, 2);
 		}
 		output << "\n]\n}";
 	});
@@ -718,7 +730,7 @@ bool exportCorpusCsv(const std::string& path, const CorpusManifest& manifest,
 			row[7] = std::to_string(manifest.patchSignature->family);
 			row[18] = manifest.patchSignature->vulnerableBinaryIdentity + " | "
 			    + manifest.patchSignature->fixedBinaryIdentity;
-			row[20] = patchSignatureJson(*manifest.patchSignature).dump();
+			row[20] = dumpBinaryDerivedJson(patchSignatureJson(*manifest.patchSignature));
 			writeRow(row);
 		}
 		for (const auto& [binary, classification] : manifest.patchClassifications)

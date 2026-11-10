@@ -787,7 +787,9 @@ DiffViewType::DiffViewType() : ViewType("BinjaDiffView", "Binja Diff") {}
 int DiffViewType::getPriority(BinaryViewRef data, const QString&)
 {
 	// Offer the view for any analyzed binary, but never as the default.
-	return data->GetAnalysisFunctionList().empty() ? 0 : 1;
+	// Asked for every view of every open file; do not materialise the whole
+	// function list just to test whether it is empty.
+	return data && data->HasFunctions() ? 1 : 0;
 }
 
 QWidget* DiffViewType::create(BinaryViewRef data, ViewFrame* frame)

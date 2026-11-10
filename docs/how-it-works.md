@@ -131,6 +131,11 @@ requires evaluated patch-region coverage and a score margin. A confirmed
 unmatched anchor block is evaluated as absent; extraction or mapping failures
 remain missing coverage. Threshold changes reclassify cached targets, while
 insufficient coverage remains ambiguous.
+Signature creation and target classification run on the UI thread and do not
+throw. A failure while extracting or diffing becomes a status message during
+creation and a not-analyzed cell with the error as evidence during
+classification. One classification pass extracts each anchor function once
+and reuses it for every target binary.
 The same signature records an explainable security-relevance assessment over
 fixed-side additions and vulnerable-side removals. Added guards, removed unsafe
 memory operations, other memory or lifetime operations,
@@ -213,6 +218,13 @@ snapshots, so cache eviction cannot free a handle still in use.
 
 The native library must match the installed Binary Ninja core ABI and bundled
 Qt minor version.
+
+Symbol names and token text come from the analyzed binary and need not be
+valid UTF-8. Every JSON document that carries them is serialized with U+FFFD
+in place of each invalid sequence: whole-binary and selected-pair extraction,
+block and line requests to the engine, persisted match results, the corpus
+manifest, and both exports. Both sides of a comparison therefore see the same
+replacement text, and one malformed name cannot fail a request.
 
 ## Workspace and direction
 
@@ -523,6 +535,9 @@ above are the current ones; earlier schemas used different filters, recorded in
 - **Cosmetic** means raw rendering differs but the canonical ordered body, CFG,
   and outgoing-call count agree after relocation normalization.
 - **Changed** means the canonical body, CFG, or outgoing-call count differs.
+- Corpus tabs count a match as unchanged from this content state. A result
+  that carries no content state is unchanged at similarity 0.9995 or above.
+  The matrix, families, lineage, and transition cells share that rule.
 - **Overall** is matched similarity multiplied by coverage, so unmatched
   functions contribute zero.
 

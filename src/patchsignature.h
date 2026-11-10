@@ -96,9 +96,23 @@ std::optional<PatchSignature> buildPatchSignature(FunctionFamilyId family,
 	BinaryViewRef fixedView, const FunctionOccurrence& fixed,
 	std::string* error = nullptr);
 
+// The two anchor extractions depend only on the signature, not on the target.
+// A caller classifying several targets against the same anchor views passes one
+// cache so each anchor graph is built once instead of once per target.
+struct PatchAnchorCache
+{
+	bool vulnerableExtracted = false;
+	bool fixedExtracted = false;
+	std::optional<ExtractedFunction> vulnerable;
+	std::optional<ExtractedFunction> fixed;
+};
+
+// Both entry points are called from GUI-thread slots and never throw: an
+// unexpected failure is reported through `error` or as PatchState::NotAnalyzed.
 PatchClassification evaluatePatchTarget(const PatchSignature& signature,
 	BinaryViewRef vulnerableView, BinaryViewRef fixedView,
 	BinaryViewRef targetView, const std::optional<FunctionOccurrence>& target,
-	double minimumScoreMargin = 0.1, double minimumPatchCoverage = 0.6);
+	double minimumScoreMargin = 0.1, double minimumPatchCoverage = 0.6,
+	PatchAnchorCache* anchors = nullptr);
 
 }  // namespace bn_graph_diff

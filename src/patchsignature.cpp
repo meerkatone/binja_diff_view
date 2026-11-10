@@ -509,9 +509,7 @@ void appendChangedBlockAddresses(PatchSignature& signature,
 	signature.fixedPatchBlockIndices.assign(fixedIndices.begin(), fixedIndices.end());
 }
 
-}  // namespace
-
-std::optional<PatchSignature> buildPatchSignature(FunctionFamilyId family,
+std::optional<PatchSignature> buildPatchSignatureUnchecked(FunctionFamilyId family,
 	BinaryViewRef vulnerableView, const FunctionOccurrence& vulnerable,
 	BinaryViewRef fixedView, const FunctionOccurrence& fixed, std::string* error)
 {
@@ -652,10 +650,10 @@ std::optional<PatchSignature> buildPatchSignature(FunctionFamilyId family,
 	return signature;
 }
 
-PatchClassification evaluatePatchTarget(const PatchSignature& signature,
+PatchClassification evaluatePatchTargetUnchecked(const PatchSignature& signature,
 	BinaryViewRef vulnerableView, BinaryViewRef fixedView,
 	BinaryViewRef targetView, const std::optional<FunctionOccurrence>& target,
-	double minimumScoreMargin, double minimumPatchCoverage)
+	double minimumScoreMargin, double minimumPatchCoverage, PatchAnchorCache& anchors)
 {
 	PatchClassification classification;
 	classification.binary = target ? target->binary : 0;
@@ -724,9 +722,19 @@ PatchClassification evaluatePatchTarget(const PatchSignature& signature,
 		classification.evidence.push_back("One selected function is unavailable");
 		return classification;
 	}
-	auto extractedVulnerable = DiffEngine::instance().extract(
-	    vulnerableFunction, signature.viewType);
-	auto extractedFixed = DiffEngine::instance().extract(fixedFunction, signature.viewType);
+	if (!anchors.vulnerableExtracted)
+	{
+		anchors.vulnerable = DiffEngine::instance().extract(
+		    vulnerableFunction, signature.viewType);
+		anchors.vulnerableExtracted = true;
+	}
+	if (!anchors.fixedExtracted)
+	{
+		anchors.fixed = DiffEngine::instance().extract(fixedFunction, signature.viewType);
+		anchors.fixedExtracted = true;
+	}
+	const auto& extractedVulnerable = anchors.vulnerable;
+	const auto& extractedFixed = anchors.fixed;
 	auto extractedTarget = DiffEngine::instance().extract(targetFunction, signature.viewType);
 	if (!extractedVulnerable || !extractedFixed || !extractedTarget)
 	{
@@ -766,6 +774,60 @@ PatchClassification evaluatePatchTarget(const PatchSignature& signature,
 	    + std::to_string(fixedScore.similarity));
 	classification.evidence.push_back("Patch-region coverage "
 	    + std::to_string(classification.patchRegionCoverage));
+	return classification;
+}
+
+}  // namespace
+
+std::optional<PatchSignature> buildPatchSignature(FunctionFamilyId family,
+	BinaryViewRef vulnerableView, const FunctionOccurrence& vulnerable,
+	BinaryViewRef fixedView, const FunctionOccurrence& fixed, std::string* error)
+{
+	try
+	{
+		return buildPatchSignatureUnchecked(
+		    family, vulnerableView, vulnerable, fixedView, fixed, error);
+	}
+	catch (const std::exception& exception)
+	{
+		if (error)
+			*error = std::string("Patch signature failed: ") + exception.what();
+	}
+	catch (...)
+	{
+		if (error)
+			*error = "Patch signature failed with an unknown error";
+	}
+	return std::nullopt;
+}
+
+PatchClassification evaluatePatchTarget(const PatchSignature& signature,
+	BinaryViewRef vulnerableView, BinaryViewRef fixedView,
+	BinaryViewRef targetView, const std::optional<FunctionOccurrence>& target,
+	double minimumScoreMargin, double minimumPatchCoverage, PatchAnchorCache* anchors)
+{
+	PatchAnchorCache local;
+	std::string failure;
+	try
+	{
+		return evaluatePatchTargetUnchecked(signature, vulnerableView, fixedView,
+		    targetView, target, minimumScoreMargin, minimumPatchCoverage,
+		    anchors ? *anchors : local);
+	}
+	catch (const std::exception& exception)
+	{
+		failure = exception.what();
+	}
+	catch (...)
+	{
+		failure = "unknown error";
+	}
+	PatchClassification classification;
+	classification.binary = target ? target->binary : 0;
+	if (target)
+		classification.occurrence = *target;
+	classification.state = PatchState::NotAnalyzed;
+	classification.evidence.push_back("Patch-region comparison failed: " + failure);
 	return classification;
 }
 

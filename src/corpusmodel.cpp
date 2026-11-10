@@ -72,6 +72,11 @@ bool prereleaseRemainder(const std::vector<ReleaseNameToken>& tokens, size_t sta
 
 }  // namespace
 
+bool matchContentUnchanged(const std::string& contentMatch, double similarity)
+{
+	return contentMatch.empty() ? similarity >= 0.9995 : contentMatch != "Changed";
+}
+
 bool naturalReleaseNameLess(const std::string& left, const std::string& right)
 {
 	auto leftTokens = tokenizeReleaseName(left);
@@ -235,9 +240,7 @@ CorpusPairMetrics calculateCorpusMetrics(size_t sourceFunctionCount,
 		metrics.meanConfidence += match.confidence;
 		similarities.push_back(match.similarity);
 		metrics.matchesByMethod[match.matchType]++;
-		bool unchanged = match.contentMatch.empty()
-		    ? match.similarity >= 0.9995 : match.contentMatch != "Changed";
-		if (unchanged)
+		if (matchContentUnchanged(match.contentMatch, match.similarity))
 			metrics.exactMatchCount++;
 		else
 			metrics.changedMatchCount++;
@@ -354,8 +357,7 @@ void classifyFamily(FunctionFamily& family, size_t binaryCount)
 	{
 		bool identical = std::all_of(family.acceptedLinks.begin(),
 		    family.acceptedLinks.end(), [](const FamilyLinkEvidence& link) {
-			    return link.contentMatch.empty()
-			        ? link.similarity >= 0.9995 : link.contentMatch != "Changed";
+			    return matchContentUnchanged(link.contentMatch, link.similarity);
 		    });
 		family.state = identical ? FunctionFamilyState::Identical
 		                         : FunctionFamilyState::Changed;
@@ -689,8 +691,7 @@ FunctionLineageCell classifyFunctionLineage(const FunctionFamily& family,
 	cell.similarity = strongest->similarity;
 	cell.confidence = strongest->confidence;
 	cell.matchType = strongest->matchType;
-	bool unchanged = strongest->contentMatch.empty()
-	    ? strongest->similarity >= 0.999 : strongest->contentMatch != "Changed";
+	bool unchanged = matchContentUnchanged(strongest->contentMatch, strongest->similarity);
 	cell.state = unchanged
 	    ? FunctionLineageState::Identical : FunctionLineageState::Changed;
 	return cell;
@@ -790,8 +791,7 @@ FunctionTransitionCell classifyFunctionTransition(const FunctionFamily& family,
 		cell.state = FunctionTransitionState::Unresolved;
 		return cell;
 	}
-	bool unchanged = strongest->contentMatch.empty()
-	    ? strongest->similarity >= 0.999 : strongest->contentMatch != "Changed";
+	bool unchanged = matchContentUnchanged(strongest->contentMatch, strongest->similarity);
 	cell.state = unchanged
 	    ? FunctionTransitionState::Unchanged : FunctionTransitionState::Modified;
 	return cell;
