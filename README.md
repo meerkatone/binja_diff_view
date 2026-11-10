@@ -16,14 +16,17 @@ Binja Diff View is a native C++ UI plugin with a bundled Rust matching engine.
 It is intended for a **view-only community catalog listing**, with manual
 installation from [GitHub releases](https://github.com/meerkatone/binja_diff_view/releases).
 
-The available **v0.1.3 macOS Apple Silicon** package was built for **Binary Ninja
-6.1.11052 development**, **core ABI 192**, **UI ABI 20**, and **Qt 6.11.1**.
+The available **v0.1.5 macOS Apple Silicon** package was built for **Binary Ninja
+6.1.11107 development**, **core ABI 192**, **UI ABI 21**, and **Qt 6.11.1**.
+Binary Ninja builds that still use UI ABI 20, such as 6.1.11052, need the
+[v0.1.3 package](https://github.com/meerkatone/binja_diff_view/releases/tag/v0.1.3)
+or a source build.
 Other Binary Ninja builds may require rebuilding from source. The catalog's
 minimum build number does not guarantee that a prebuilt library works with
 every newer build; the native core ABI, UI ABI, and Qt version must match.
 
 1. Download the macOS ARM64 archive and `SHA256SUMS.txt` from the
-   [v0.1.3 release](https://github.com/meerkatone/binja_diff_view/releases/tag/v0.1.3).
+   [v0.1.5 release](https://github.com/meerkatone/binja_diff_view/releases/tag/v0.1.5).
 2. In the download directory, check its checksum:
 
    ```sh
@@ -314,4 +317,9 @@ For community catalog submission and release checks, see
 
 Authenticated ARM64 calls (`blraa`, `blrab`, `blraaz`, `blrabz`) participate in
 call recognition alongside `bl` and `blr`. Authenticated branches and returns
-remain distinct. The engine regression and all 11 CTest targets pass.
+remain distinct. The engine regression and all 12 CTest targets pass.
+
+Names and token text that are not valid UTF-8 are shown and stored with the
+replacement character (U+FFFD) in place of each invalid sequence. Such text
+does not stop a function diff, a patch-signature classification, a corpus
+manifest save, or an export.

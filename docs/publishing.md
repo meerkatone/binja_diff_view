@@ -10,13 +10,15 @@ and [metadata template](https://github.com/Vector35/sample_plugin/blob/master/pl
 
 ## Metadata
 
-The root `plugin.json` records plugin version **0.1.4**. Its
+The root `plugin.json` records plugin version **0.1.5**. Its
 `api` list is empty because this native plugin has no scripting provider or
 Python dependencies. `platforms` advertises only `Darwin`, the platform with
 a released prebuilt package. Source build instructions for other platforms
 do not establish tested binary compatibility.
 
-`minimumbinaryninjaversion` records the tested build number, `11052`.
+`minimumbinaryninjaversion` records the tested build number, `11107`, the
+build the v0.1.5 package was compiled against. Source builds also worked on
+`11052`, which used UI ABI 20.
 Prebuilt libraries additionally require the core ABI, UI ABI, Qt version, and
 CPU architecture recorded in their release notes. Update this information
 when validating another Binary Ninja build or adding a supported platform.
@@ -40,10 +42,10 @@ the bundled engine's separate copyright and license in distributed packages.
    package, perform a clean installation and the focused GUI checks in
    [Testing](testing.md). Record the actual results in the release notes.
 3. Commit the metadata and documentation, and publish a new GitHub release
-   tagged `v0.1.4` at that commit. The current `v0.1.3` tag has no metadata;
-   retain it as the existing release. If attaching new binaries, package both
-   native libraries, installation instructions, build/ABI details, licenses,
-   and checksums. Until then, the README links to the existing v0.1.3 package.
+   tagged `v<version>` at that commit. Keep earlier releases: `v0.1.3` is the
+   last package for UI ABI 20. When attaching binaries, package both native
+   libraries, installation instructions, build/ABI details, licenses, and
+   checksums, and point the README's install section at that release.
 4. File a [community plugin submission issue](https://github.com/Vector35/community-plugins/issues/new/choose)
    with the repository URL below. Request **view-only** publication explicitly.
 
@@ -53,7 +55,7 @@ the bundled engine's separate copyright and license in distributed packages.
    Please list Binja Diff View as view_only. This is a native C++ UI plugin
    with a bundled Rust engine, installed manually from GitHub releases or
    built from source. The available prebuilt package is for macOS ARM64 and
-   Binary Ninja 6.1.11052-dev; its core/UI ABI and Qt requirements are in the
+   Binary Ninja 6.1.11107-dev; its core/UI ABI and Qt requirements are in the
    README and release notes. plugin.json is at the repository root.
    ```
 
