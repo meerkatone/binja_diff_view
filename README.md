@@ -16,17 +16,20 @@ Binja Diff View is a native C++ UI plugin with a bundled Rust matching engine.
 It is intended for a **view-only community catalog listing**, with manual
 installation from [GitHub releases](https://github.com/meerkatone/binja_diff_view/releases).
 
-The available **v0.1.5 macOS Apple Silicon** package was built for **Binary Ninja
-6.1.11107 development**, **core ABI 192**, **UI ABI 21**, and **Qt 6.11.1**.
+The available **v0.1.6 macOS Apple Silicon** package was built for **Binary Ninja
+6.1.11108 development**, **core ABI 192**, **UI ABI 21**, and **Qt 6.11.1**.
 Binary Ninja builds that still use UI ABI 20, such as 6.1.11052, need the
 [v0.1.3 package](https://github.com/meerkatone/binja_diff_view/releases/tag/v0.1.3)
 or a source build.
+The [v0.1.5 package](https://github.com/meerkatone/binja_diff_view/releases/tag/v0.1.5)
+remains available for build 11107. Version 0.1.6 is a compatibility rebuild;
+its matching and UI implementation are unchanged from 0.1.5.
 Other Binary Ninja builds may require rebuilding from source. The catalog's
 minimum build number does not guarantee that a prebuilt library works with
 every newer build; the native core ABI, UI ABI, and Qt version must match.
 
 1. Download the macOS ARM64 archive and `SHA256SUMS.txt` from the
-   [v0.1.5 release](https://github.com/meerkatone/binja_diff_view/releases/tag/v0.1.5).
+   [v0.1.6 release](https://github.com/meerkatone/binja_diff_view/releases/tag/v0.1.6).
 2. In the download directory, check its checksum:
 
    ```sh

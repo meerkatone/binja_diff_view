@@ -15,7 +15,7 @@
   "platforms": [
     "Darwin"
   ],
-  "version": "0.1.5",
+  "version": "0.1.6",
   "author": "meerkatone",
-  "minimumbinaryninjaversion": 11107
+  "minimumbinaryninjaversion": 11108
 }
