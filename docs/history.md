@@ -127,6 +127,17 @@ evidence and cannot be reproduced from the repository alone.
     netp191 and oem7a corpora. There, a patched function has an identical
     twin, and address order breaks the tie correctly. That rule was not
     adopted.
+  - The controlled netp191 and oem7a pairs patch operands in place, so each
+    function's address is its identity. Replaying their earlier extractions
+    through the 0.1.8 engine gives a precision of 99.49% with recall of
+    99.49% on netp191, and a precision of 98.53% with recall of 97.63% on
+    oem7a. No unchanged function was reported `Changed` (0 of 1,821 and 0 of
+    3,603). Every function of ten or more instructions whose body differs was
+    paired correctly and reported `Changed` (52 of 52 and 1,191 of 1,191). All
+    65 misses are callerless 3-to-8-instruction stubs such as
+    `push [ebp+8]; call sub_10027a40; ret`, and each has identical twins.
+    Some differ only in Binary Ninja's variable annotations. They are left
+    unmatched or paired with a twin at 50% confidence.
   - sshd 9.7p1 → sshd-session 9.8p1 (CVE-2024-6387). The fresh extraction
     produced 7,172 matches, 43 A-only and 7 B-only functions. The previous
     extraction produced 7,171, 44 and 7. Replayed through the 0.1.8 engine,
