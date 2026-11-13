@@ -1,6 +1,7 @@
 #include "diffengine.h"
 #include "filedigest.h"
 
+#include <QtCore/QCoreApplication>
 #include <QtCore/QCryptographicHash>
 #include <QtCore/QDir>
 #include <QtCore/QElapsedTimer>
@@ -8,6 +9,7 @@
 #include <QtCore/QFileInfo>
 #include <QtCore/QLibrary>
 #include <QtCore/QSaveFile>
+#include <QtCore/QThread>
 
 #include <algorithm>
 #include <atomic>
@@ -28,6 +30,7 @@
 #include "nlohmann/json.hpp"
 #include "diffmodel.h"
 #include "diskcache.h"
+#include "extractionsettling.h"
 #include "jsontext.h"
 
 using namespace BinaryNinja;
@@ -465,6 +468,7 @@ FunctionMatchMaps functionMatchMapsFromJson(const json& value)
 }
 
 }  // namespace
+
 
 bool materializingFunctionAnalysis()
 {
@@ -1127,22 +1131,268 @@ static std::optional<std::vector<json>> extractFunctionsInParallel(BinaryView* b
 	return extracted;
 }
 
-static std::optional<std::string> extractBinaryForMatch(
+// A function entry is compared by the text the extraction holds for it. A
+// parsed entry serializes to the same text: object keys are ordered and every
+// number is an unsigned integer.
+static std::string entryTextDigest(const std::string& text)
+{
+	return QCryptographicHash::hash(
+	    QByteArrayView(text.data(), static_cast<qsizetype>(text.size())), QCryptographicHash::Sha256)
+	    .toStdString();
+}
+
+static std::shared_ptr<const FunctionDigests> extractionFunctionDigests(const std::string& text)
+{
+	auto digests = std::make_shared<FunctionDigests>();
+	const json functions = json::parse(text, nullptr, false);
+	if (!functions.is_array())
+		return digests;
+	for (const auto& entry : functions)
+	{
+		auto address = entry.find("address");
+		if (address != entry.end() && address->is_number_unsigned())
+			(*digests)[address->get<uint64_t>()].push_back(
+			    entryTextDigest(dumpBinaryDerivedJson(entry)));
+	}
+	for (auto& [address, values] : *digests)
+		std::sort(values.begin(), values.end());
+	return digests;
+}
+
+struct ExtractedBinary
+{
+	std::string json;
+	std::shared_ptr<const FunctionDigests> digests;
+};
+
+// Extracting a view changes it. Binary Ninja keeps IL for few functions, so
+// extraction regenerates most of it, and regeneration can discover code that
+// initial analysis did not: in sshd-session 9.8p1 it creates a function at a
+// fall-through tail and queues its neighbours for reanalysis. The queued work
+// runs when analysis is next started, typically as a diff workspace opens, and
+// moves instructions between functions after the extraction was recorded. A
+// view that is being extracted therefore absorbs its own function changes:
+// they are collected here, analysis is run to completion, and only the
+// reported functions are extracted again, until a round reports nothing.
+// Analysis already queued when extraction starts is run first, so that every
+// function is extracted from the same state.
+namespace
+{
+using SettleKey = std::pair<size_t, std::string>;
+
+SettleKey settleKey(BinaryView* view)
+{
+	if (!view)
+		return {};
+	Ref<FileMetadata> file = view->GetFile();
+	return {file ? file->GetSessionId() : 0, view->GetTypeName()};
+}
+
+ExtractionSettling<SettleKey> g_extractionSettling;
+
+// The disk cache is keyed by the file, and stands for the analysis a fresh load
+// of that file produces. Once a view's functions have changed after loading,
+// that is no longer this view: a cached extraction would be reloaded in place
+// of the changed functions, and a new one would be stored for sessions that
+// start from the unchanged state. Such a view stops using the disk cache.
+class AnalysisDrift
+{
+  public:
+	void mark(const SettleKey& key)
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		m_drifted.insert(key);
+	}
+	bool contains(const SettleKey& key)
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		return m_drifted.count(key) != 0;
+	}
+
+  private:
+	std::mutex m_mutex;
+	std::set<SettleKey> m_drifted;
+};
+
+AnalysisDrift g_analysisDrift;
+
+// The controller observes only views that have a diff pane; a corpus extracts
+// views that have none.
+class ExtractionChangeCollector : public BinaryDataNotification
+{
+  public:
+	explicit ExtractionChangeCollector(BinaryViewRef view) :
+	    BinaryDataNotification(FunctionUpdates | FunctionUpdateRequested),
+	    m_view(std::move(view)), m_key(settleKey(m_view))
+	{
+		g_extractionSettling.begin(m_key);
+		m_view->RegisterNotification(this);
+	}
+	~ExtractionChangeCollector() override
+	{
+		m_view->UnregisterNotification(this);
+		g_extractionSettling.end(m_key);
+	}
+	const SettleKey& key() const { return m_key; }
+
+	void OnAnalysisFunctionAdded(BinaryView*, Function* func) override { note(func); }
+	void OnAnalysisFunctionRemoved(BinaryView*, Function* func) override { note(func); }
+	void OnAnalysisFunctionUpdateRequested(BinaryView*, Function* func) override { note(func); }
+	void OnAnalysisFunctionUpdated(BinaryView*, Function* func) override
+	{
+		// Regenerating IL for extraction reports an update on the extracting thread.
+		if (!t_materializingFunctionAnalysis)
+			note(func);
+	}
+
+  private:
+	void note(Function* func)
+	{
+		if (func)
+			g_extractionSettling.absorb(m_key, func->GetStart());
+	}
+	BinaryViewRef m_view;
+	SettleKey m_key;
+};
+
+constexpr int kMaxSettleRounds = 6;
+}  // namespace
+
+bool DiffEngine::absorbFunctionChange(BinaryViewRef view, uint64_t start)
+{
+	return view && g_extractionSettling.absorb(settleKey(view), start);
+}
+
+static void insertCalleeStarts(const json& entry, std::set<uint64_t>& starts)
+{
+	auto callees = entry.find("callees");
+	if (callees == entry.end() || !callees->is_array())
+		return;
+	for (const auto& callee : *callees)
+		if (callee.is_number_unsigned())
+			starts.insert(callee.get<uint64_t>());
+}
+
+static std::optional<ExtractedBinary> extractBinaryForMatch(
     BinaryViewRef bv, Ref<BackgroundTask> task, const char* side)
 {
-	const FunctionStringMap derivedStrings = derivedStringReferences(bv);
-	auto extracted = extractFunctionsInParallel(
-	    bv, bv->GetAnalysisFunctionList(), derivedStrings, task, side);
+	// UpdateAnalysisAndWait() must not block the UI thread; matching runs on
+	// worker threads, so this only guards an unexpected caller.
+	const QCoreApplication* application = QCoreApplication::instance();
+	const bool canWait = !application || QThread::currentThread() != application->thread();
+	ExtractionChangeCollector collector(bv);
+	if (canWait)
+	{
+		bv->UpdateAnalysisAndWait();
+		if (!g_extractionSettling.take(collector.key()).empty())
+		{
+			g_analysisDrift.mark(collector.key());
+		}
+	}
+	FunctionStringMap derivedStrings = derivedStringReferences(bv);
+	std::vector<Ref<Function>> functionList = bv->GetAnalysisFunctionList();
+	auto extracted = extractFunctionsInParallel(bv, functionList, derivedStrings, task, side);
 	if (!extracted)
 		return std::nullopt;
-	json functions = json::array();
-	for (auto& function : *extracted)
-		functions.push_back(std::move(function));
+	std::vector<json> entries = std::move(*extracted);
+
+	for (int round = 0; canWait; round++)
+	{
+		if (task && task->IsCancelled())
+			return std::nullopt;
+		bv->UpdateAnalysisAndWait();
+		const std::set<uint64_t> changed = g_extractionSettling.takeOrEnd(collector.key());
+		if (changed.empty())
+			break;
+		if (round == kMaxSettleRounds)
+		{
+			LogWarn("binja_diff_view: analysis of binary %s kept changing %zu function(s) "
+			        "during extraction; matching uses the last extracted state",
+			    side, changed.size());
+			break;
+		}
+		g_analysisDrift.mark(collector.key());
+		if (task)
+			task->SetProgressText("Binja Diff: settling analysis of binary " + std::string(side) + "…");
+
+		// A changed function also changes the caller list recorded for each
+		// function it calls, before and after the change.
+		std::map<uint64_t, std::vector<size_t>> previous;
+		std::set<uint64_t> refresh;
+		for (size_t index = 0; index < functionList.size(); index++)
+		{
+			const uint64_t start = functionList[index]->GetStart();
+			previous[start].push_back(index);
+			if (changed.count(start))
+				insertCalleeStarts(entries[index], refresh);
+		}
+		derivedStrings = derivedStringReferences(bv);
+		std::vector<Ref<Function>> currentList = bv->GetAnalysisFunctionList();
+		std::map<uint64_t, size_t> occurrences;
+		for (const auto& function : currentList)
+			occurrences[function->GetStart()]++;
+		auto reusable = [&](uint64_t start) {
+			auto recorded = previous.find(start);
+			return recorded != previous.end() && recorded->second.size() == 1
+			    && occurrences[start] == 1;
+		};
+		std::vector<json> current(currentList.size());
+		std::vector<bool> filled(currentList.size(), false);
+		auto extractWhere = [&](const std::function<bool(uint64_t)>& selected) {
+			std::vector<Ref<Function>> subset;
+			std::vector<size_t> indices;
+			for (size_t index = 0; index < currentList.size(); index++)
+				if (!filled[index] && selected(currentList[index]->GetStart()))
+				{
+					subset.push_back(currentList[index]);
+					indices.push_back(index);
+				}
+			auto result = extractFunctionsInParallel(bv, subset, derivedStrings, task, side);
+			if (!result)
+				return false;
+			for (size_t item = 0; item < indices.size(); item++)
+			{
+				current[indices[item]] = std::move((*result)[item]);
+				filled[indices[item]] = true;
+			}
+			return true;
+		};
+		if (!extractWhere([&](uint64_t start) { return changed.count(start) || !reusable(start); }))
+			return std::nullopt;
+		for (size_t index = 0; index < currentList.size(); index++)
+			if (filled[index] && changed.count(currentList[index]->GetStart()))
+				insertCalleeStarts(current[index], refresh);
+		if (!extractWhere([&](uint64_t start) { return refresh.count(start) != 0; }))
+			return std::nullopt;
+		for (size_t index = 0; index < currentList.size(); index++)
+			if (!filled[index])
+				current[index] = std::move(entries[previous[currentList[index]->GetStart()].front()]);
+		functionList = std::move(currentList);
+		entries = std::move(current);
+	}
+
 	// Symbol and derived-string data originate in analysis plugins and may contain
 	// malformed UTF-8. Replacement encoding keeps one bad label from aborting a
 	// whole-binary match; Rust receives valid UTF-8 and the original BNDB is not
-	// modified.
-	return dumpBinaryDerivedJson(functions);
+	// modified. The array is assembled from its entries' own text so that each
+	// entry is serialized once for both the extraction and its digest.
+	ExtractedBinary result;
+	auto digests = std::make_shared<FunctionDigests>();
+	result.json = "[";
+	for (size_t index = 0; index < entries.size(); index++)
+	{
+		const std::string text = dumpBinaryDerivedJson(entries[index]);
+		entries[index] = nullptr;
+		if (index)
+			result.json += ',';
+		result.json += text;
+		(*digests)[functionList[index]->GetStart()].push_back(entryTextDigest(text));
+	}
+	result.json += "]";
+	for (auto& [address, values] : *digests)
+		std::sort(values.begin(), values.end());
+	result.digests = std::move(digests);
+	return result;
 }
 
 static std::string hexAddr(uint64_t addr)
@@ -1191,6 +1441,7 @@ std::optional<std::string> DiffEngine::persistentViewIdentity(BinaryViewRef view
 	// A disk cache represents the last saved BNDB. Never use or publish it over
 	// unsaved bytes, symbols, types, or auto-analysis changes.
 	if (!file || file->IsModified() || file->IsAnalysisChanged()
+	    || g_analysisDrift.contains(settleKey(view))
 #if BN_CURRENT_CORE_ABI_VERSION >= 180
 	    || view->GetAnalysisState() != IdleState)
 #else
@@ -1400,13 +1651,14 @@ DiffEngine::BinaryExtractionRef DiffEngine::extractBinaryForMatchCached(
 	auto extracted = extractBinaryForMatch(view, task, side);
 	if (!extracted)
 		return {};
-	auto snapshot = std::make_shared<BinaryExtraction>(std::move(*extracted));
+	auto snapshot = std::make_shared<BinaryExtraction>(std::move(extracted->json));
 	bool publish = false;
 	{
 		std::lock_guard<std::mutex> lock(m_matchMutex);
 		if (m_viewEpoch[key] == epoch)
 		{
 			m_extractionCache.put(key, snapshot, sizeof(BinaryExtraction) + snapshot->json.capacity());
+			recordViewDigests(key, epoch, std::move(extracted->digests));
 			publish = true;
 		}
 	}
@@ -1698,10 +1950,97 @@ void DiffEngine::invalidateMatches(BinaryViewRef view)
 	const ViewKey changed = viewKey(view);
 	std::lock_guard<std::mutex> lock(m_matchMutex);
 	m_viewEpoch[changed]++;
+	m_viewDigests.erase(changed);
 	m_extractionCache.erase(changed);
 	m_matchCache.eraseIf([&](const MatchKey& key) {
 		return key.first == changed || key.second == changed;
 	});
+}
+
+uint64_t DiffEngine::currentViewEpoch(BinaryViewRef view) const
+{
+	if (!view)
+		return 0;
+	std::lock_guard<std::mutex> lock(m_matchMutex);
+	return viewEpoch(viewKey(view));
+}
+
+void DiffEngine::recordViewDigests(
+    const ViewKey& key, uint64_t epoch, std::shared_ptr<const FunctionDigests> digests)
+{
+	m_viewDigests[key] = {epoch, std::move(digests)};
+	if (m_viewDigests.size() <= ViewDigestLimit)
+		return;
+	for (auto entry = m_viewDigests.begin(); entry != m_viewDigests.end();)
+	{
+		if (entry->second.epoch != viewEpoch(entry->first))
+			entry = m_viewDigests.erase(entry);
+		else
+			++entry;
+	}
+	for (auto entry = m_viewDigests.begin();
+	     entry != m_viewDigests.end() && m_viewDigests.size() > ViewDigestLimit;)
+	{
+		if (entry->first < key || key < entry->first)
+			entry = m_viewDigests.erase(entry);
+		else
+			++entry;
+	}
+}
+
+bool DiffEngine::functionsDifferFromExtraction(
+    BinaryViewRef view, const std::set<uint64_t>& starts, uint64_t epoch)
+{
+	if (!view)
+		return false;
+	const ViewKey key = viewKey(view);
+	std::shared_ptr<const FunctionDigests> digests;
+	BinaryExtractionRef extraction;
+	{
+		std::lock_guard<std::mutex> lock(m_matchMutex);
+		if (viewEpoch(key) != epoch)
+			return false;
+		auto recorded = m_viewDigests.find(key);
+		if (recorded != m_viewDigests.end() && recorded->second.epoch == epoch)
+			digests = recorded->second.digests;
+		else if (auto cached = m_extractionCache.get(key))
+			extraction = *cached;
+	}
+	if (!digests)
+	{
+		// Pair results restored from disk leave no extraction in memory.
+		if (!extraction)
+			extraction = loadPersistentBinaryExtraction(view);
+		// Without the snapshot nothing can be compared; keep the conservative rule.
+		if (!extraction)
+			return true;
+		digests = extractionFunctionDigests(extraction->json);
+		if (digests->empty())
+			return true;
+		std::lock_guard<std::mutex> lock(m_matchMutex);
+		if (viewEpoch(key) != epoch)
+			return false;
+		recordViewDigests(key, epoch, digests);
+	}
+	const FunctionStringMap derivedStrings = derivedStringReferences(view);
+	Ref<DisassemblySettings> settings = new DisassemblySettings();
+	static const std::vector<std::string> absent;
+	for (uint64_t start : starts)
+	{
+		std::vector<std::string> current;
+		for (const auto& func : view->GetAnalysisFunctionsForAddress(start))
+			if (func->GetStart() == start)
+				current.push_back(entryTextDigest(dumpBinaryDerivedJson(
+				    matchFunctionToJson(view, func, settings, derivedStrings))));
+		std::sort(current.begin(), current.end());
+		auto recorded = digests->find(start);
+		if (current != (recorded == digests->end() ? absent : recorded->second))
+		{
+			g_analysisDrift.mark(settleKey(view));
+			return true;
+		}
+	}
+	return false;
 }
 
 void DiffEngine::invalidateExtraction(BinaryViewRef view)
@@ -1711,6 +2050,7 @@ void DiffEngine::invalidateExtraction(BinaryViewRef view)
 	const ViewKey changed = viewKey(view);
 	std::lock_guard<std::mutex> lock(m_matchMutex);
 	m_viewEpoch[changed]++;
+	m_viewDigests.erase(changed);
 	m_extractionCache.erase(changed);
 }
 

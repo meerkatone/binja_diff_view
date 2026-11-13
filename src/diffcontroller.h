@@ -274,6 +274,20 @@ class DiffController : public QObject, public BinaryNinja::BinaryDataNotificatio
 	// work while moving back and forth through the results table. Every analysis,
 	// symbol, or byte notification for either view invalidates affected entries.
 	std::mutex m_overlayCacheMutex;
+	// Function add/update/remove notifications that did not come from this
+	// plugin's own IL materialization, batched per view for
+	// DiffEngine::functionsDifferFromExtraction().
+	struct PendingFunctionChanges
+	{
+		BinaryNinja::Ref<BinaryNinja::BinaryView> view;
+		uint64_t epoch = 0;
+		std::set<uint64_t> starts;
+	};
+	void queueFunctionChange(BinaryNinja::BinaryView* view, BinaryNinja::Function* func);
+	void verifyQueuedFunctionChanges();
+	std::mutex m_functionChangeMutex;
+	std::map<BNBinaryView*, PendingFunctionChanges> m_functionChanges;
+	bool m_functionChangeCheckScheduled = false;
 	std::list<OverlayCacheEntry> m_overlayCache;
 	static constexpr size_t OverlayCacheLimit = 8;
 

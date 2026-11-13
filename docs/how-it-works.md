@@ -680,7 +680,8 @@ duplicate targets.
 An approved plan runs as one undoable transaction. A successful explicit
 unmatched pair becomes an in-memory manual match. During the transaction,
 symbol notifications invalidate extracted names without deleting the accepted
-address mapping. Function and byte notifications still remove the whole pair.
+address mapping. Byte notifications, and function notifications that change a
+function's extracted content, still remove the whole pair.
 At completion, the controller refreshes names only if the exact cache object
 used to build the plan remains current. It never restores a pair removed by a
 concurrent structural change. See
@@ -719,11 +720,34 @@ persisted.
 The input extraction is cached independently for each clean, saved BinaryView
 under the same identity rules. Its payload has a schema-specific path and a
 SHA-256 integrity check. This lets an A-to-C comparison reuse the exact A
-snapshot previously extracted for A-to-B. Any analysis, symbol, or byte update
-drops the in-memory snapshot. The exception is the function update Binary Ninja
-reports, on the requesting thread, when extraction itself requests a lazily
-restored function's IL. Invalidating on it would discard that extraction and
-restart it indefinitely, with or without unsaved edits in the database. Every persistent write, including the
+snapshot previously extracted for A-to-B. Any symbol or byte update drops the
+in-memory snapshot. A function notification drops it only when the function's
+extracted content changed. Three cases are told apart:
+
+- The update Binary Ninja reports, on the requesting thread, when extraction
+  itself requests a lazily restored function's IL is ignored. Invalidating on
+  it would discard that extraction and restart it indefinitely, with or without
+  unsaved edits in the database.
+- Extraction can also change the view. Generating IL lets analysis resolve
+  control flow it had left open, and Binary Ninja then creates or re-analyses
+  functions on its own threads. In `sshd-session` 9.8p1, generating IL for
+  `sub_1000255b4` creates a function at `0x100025a44` and removes that
+  instruction from `sub_10002558c`. An extraction therefore first runs any
+  analysis that is already queued, and afterwards waits for analysis and
+  extracts again every function reported as added, removed, or updated, along
+  with the caller lists of their callees, until a round reports nothing (at
+  most six rounds). The published snapshot describes the settled view.
+- Every other function notification is collected for 150 ms and checked on a
+  worker: the reported functions are extracted again and their SHA-256 digests
+  are compared with those of the snapshot. Binary Ninja restoring evicted IL
+  when a pane opens a function reports an update and changes nothing, and the
+  snapshot survives it. A real difference, or a view with no snapshot to
+  compare against, drops the snapshot as before. Rendered overlays are evicted
+  in either case.
+
+A view whose functions changed after it was loaded no longer matches what a
+fresh load of the same file produces, so it stops reading and writing the disk
+cache for the rest of the session. Every persistent write, including the
 background write after a save, hashes the file identity and writes a temporary
 file, then commits it by atomic rename under the same mutex that invalidation
 uses to delete artifacts. It commits only if the view epochs are unchanged and,

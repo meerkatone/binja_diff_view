@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -245,6 +246,10 @@ struct PreparedFunctionMatches
 	uint64_t epochB = 0;
 };
 
+// SHA-256 of each function entry of a whole-binary extraction, by function
+// start; sorted where several functions share a start.
+using FunctionDigests = std::map<uint64_t, std::vector<std::string>>;
+
 class DiffEngine
 {
   public:
@@ -309,6 +314,19 @@ class DiffEngine
 	bool persistCachedFunctionMatches(BinaryViewRef a, BinaryViewRef b) const;
 	bool persistCachedBinaryExtraction(BinaryViewRef view) const;
 	void invalidateMatches(BinaryViewRef view);
+	uint64_t currentViewEpoch(BinaryViewRef view) const;
+	// Analysis reports function updates that do not change anything an
+	// extraction records: Binary Ninja restores evicted IL and finishes deferred
+	// analysis when the UI or another reader requests a function. Re-extract only
+	// the reported functions and compare them with the view's cached extraction.
+	// Returns true (invalidate) when any differs, when the cached extraction is
+	// missing, or on failure; false when nothing changed or the view was already
+	// invalidated after `epoch` was read.
+	bool functionsDifferFromExtraction(
+	    BinaryViewRef view, const std::set<uint64_t>& starts, uint64_t epoch);
+	// True when `view` is being extracted and that extraction will re-extract the
+	// function at `start` itself; the caller must then not invalidate the view.
+	bool absorbFunctionChange(BinaryViewRef view, uint64_t start);
 	// Drop one view's reusable extraction without discarding a deliberately
 	// republished pair match (used during controlled symbol-port operations).
 	void invalidateExtraction(BinaryViewRef view);
@@ -394,6 +412,22 @@ class DiffEngine
 	mutable SharedResultCache<MatchKey, FunctionMatchMaps> m_matchCache;
 	mutable WeightedLruCache<ViewKey, BinaryExtractionRef> m_extractionCache;
 	std::map<ViewKey, uint64_t> m_viewEpoch;
+	// The function digests of each view's extraction at the recorded epoch. They
+	// are held apart from m_extractionCache: a corpus evicts extractions while
+	// its views stay open, and a view that cannot use the disk cache would then
+	// have nothing to compare a reported function update with.
+	struct ViewDigests
+	{
+		uint64_t epoch = 0;
+		std::shared_ptr<const FunctionDigests> digests;
+	};
+	std::map<ViewKey, ViewDigests> m_viewDigests;
+	// Requires m_matchMutex. Views are not reported when they close, so the map
+	// is bounded: digests of superseded epochs go first, then any other view's.
+	// A view without digests falls back to its extraction, then to invalidating.
+	void recordViewDigests(
+	    const ViewKey& key, uint64_t epoch, std::shared_ptr<const FunctionDigests> digests);
+	static constexpr size_t ViewDigestLimit = 64;
 	// Rematch discards one pair without an analysis change, so it advances this
 	// count rather than the view epochs.
 	std::map<MatchKey, uint64_t> m_pairInvalidation;

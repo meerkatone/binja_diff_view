@@ -358,18 +358,98 @@ bool DiffController::cacheOverlay(OverlayCacheEntry entry, uint64_t revision)
 	return true;
 }
 
-void DiffController::OnAnalysisFunctionAdded(BinaryView* view, Function*) { invalidateView(view); }
-void DiffController::OnAnalysisFunctionRemoved(BinaryView* view, Function*) { invalidateView(view); }
-// Whole-binary extraction requests each function's IL, which restores lazily
-// loaded analysis and reports a function update on the requesting thread.
-// Nothing an extraction or match depends on has changed; invalidating there
-// would discard the extraction that caused the update and restart it
-// indefinitely, whether or not the database has unsaved edits.
-void DiffController::OnAnalysisFunctionUpdated(BinaryView* view, Function*)
+// Function notifications do not by themselves mean the code changed. Whole-
+// binary extraction requests each function's IL, which restores lazily loaded
+// analysis and reports a function update on the requesting thread; those are
+// ignored outright, or the extraction that caused them would be discarded and
+// restarted indefinitely. Binary Ninja also restores evicted IL and completes
+// deferred analysis on its own threads when the UI opens a function, which
+// reported updates for unrelated functions while a corpus drill-down was opening
+// and failed its snapshot check. Every other add, update and removal is
+// re-extracted after a short delay and compared with the cached extraction;
+// only a real difference, or a missing snapshot, invalidates the view.
+void DiffController::OnAnalysisFunctionAdded(BinaryView* view, Function* func)
+{
+	queueFunctionChange(view, func);
+}
+void DiffController::OnAnalysisFunctionRemoved(BinaryView* view, Function* func)
+{
+	queueFunctionChange(view, func);
+}
+void DiffController::OnAnalysisFunctionUpdated(BinaryView* view, Function* func)
 {
 	if (!materializingFunctionAnalysis())
-		invalidateView(view);
+		queueFunctionChange(view, func);
 }
+
+void DiffController::queueFunctionChange(BinaryView* view, Function* func)
+{
+	if (!view)
+		return;
+	if (!func)
+	{
+		invalidateView(view);
+		return;
+	}
+	// Overlays render IL above the level extraction records, so they are stale
+	// whether or not the extraction turns out to be unchanged.
+	invalidateOverlayCache(view);
+	if (DiffEngine::instance().absorbFunctionChange(BinaryViewRef(view), func->GetStart()))
+		return;
+	bool schedule = false;
+	{
+		std::lock_guard<std::mutex> lock(m_functionChangeMutex);
+		PendingFunctionChanges& pending = m_functionChanges[view->GetObject()];
+		if (!pending.view)
+		{
+			pending.view = view;
+			pending.epoch = DiffEngine::instance().currentViewEpoch(BinaryViewRef(view));
+		}
+		pending.starts.insert(func->GetStart());
+		schedule = !m_functionChangeCheckScheduled;
+		m_functionChangeCheckScheduled = true;
+	}
+	if (!schedule)
+		return;
+	// Notifications arrive in bursts on analysis threads. Collect a burst on the
+	// UI thread's timer, then compare on a worker: re-extraction requests IL.
+	QMetaObject::invokeMethod(this, [this]() {
+		QTimer::singleShot(150, this, [this]() {
+			BinaryNinja::WorkerEnqueue([this]() { verifyQueuedFunctionChanges(); },
+			    "Binja Diff: check function updates");
+		});
+	}, Qt::QueuedConnection);
+}
+
+void DiffController::verifyQueuedFunctionChanges()
+{
+	std::map<BNBinaryView*, PendingFunctionChanges> pending;
+	{
+		std::lock_guard<std::mutex> lock(m_functionChangeMutex);
+		pending.swap(m_functionChanges);
+		m_functionChangeCheckScheduled = false;
+	}
+	for (auto& [object, changes] : pending)
+	{
+		bool differs = true;
+		try
+		{
+			differs = DiffEngine::instance().functionsDifferFromExtraction(
+			    changes.view, changes.starts, changes.epoch);
+		}
+		catch (const std::exception& exception)
+		{
+			LogWarn("binja_diff_view: function update check failed: %s", exception.what());
+		}
+		catch (...)
+		{
+			LogWarn("binja_diff_view: function update check failed");
+		}
+		if (differs)
+			invalidateView(changes.view.GetPtr());
+	}
+}
+
 void DiffController::OnSymbolAdded(BinaryView* view, Symbol*) { invalidateSymbolView(view); }
 void DiffController::OnSymbolRemoved(BinaryView* view, Symbol*) { invalidateSymbolView(view); }
 void DiffController::OnSymbolUpdated(BinaryView* view, Symbol*) { invalidateSymbolView(view); }
