@@ -10,14 +10,14 @@ and [metadata template](https://github.com/Vector35/sample_plugin/blob/master/pl
 
 ## Metadata
 
-The root `plugin.json` records plugin version **0.1.7**. Its
+The root `plugin.json` records plugin version **0.1.8**. Its
 `api` list is empty because this native plugin has no scripting provider or
 Python dependencies. `platforms` advertises only `Darwin`, the platform with
 a released prebuilt package. Source build instructions for other platforms
 do not establish tested binary compatibility.
 
 `minimumbinaryninjaversion` records the tested build number, `11124`, the
-build the v0.1.7 package was compiled against. Source builds also worked on
+build the v0.1.8 package was compiled against. Source builds also worked on
 `11052`, which used UI ABI 20.
 Prebuilt libraries additionally require the core ABI, UI ABI, Qt version, and
 CPU architecture recorded in their release notes. Update this information

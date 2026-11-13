@@ -16,7 +16,7 @@ Binja Diff View is a native C++ UI plugin with a bundled Rust matching engine.
 It is intended for a **view-only community catalog listing**, with manual
 installation from [GitHub releases](https://github.com/meerkatone/binja_diff_view/releases).
 
-The available **v0.1.7 macOS Apple Silicon** package was built for **Binary Ninja
+The available **v0.1.8 macOS Apple Silicon** package was built for **Binary Ninja
 6.1.11124 development**, **core ABI 193**, **UI ABI 22**, and **Qt 6.11.1**.
 Binary Ninja builds that still use UI ABI 20, such as 6.1.11052, need the
 [v0.1.3 package](https://github.com/meerkatone/binja_diff_view/releases/tag/v0.1.3)
@@ -24,14 +24,15 @@ or a source build.
 The [v0.1.6 package](https://github.com/meerkatone/binja_diff_view/releases/tag/v0.1.6)
 remains available for build 11108 and the
 [v0.1.5 package](https://github.com/meerkatone/binja_diff_view/releases/tag/v0.1.5)
-for build 11107; both use core ABI 192 and UI ABI 21. Version 0.1.7 settles
-analysis while extracting functions for a diff and verifies function updates.
+for build 11107; both use core ABI 192 and UI ABI 21. Version 0.1.8 corrects
+how patched functions are matched and classified; see the
+[release notes](docs/releases/v0.1.8.md).
 Other Binary Ninja builds may require rebuilding from source. The catalog's
 minimum build number does not guarantee that a prebuilt library works with
 every newer build; the native core ABI, UI ABI, and Qt version must match.
 
 1. Download the macOS ARM64 archive and `SHA256SUMS.txt` from the
-   [v0.1.7 release](https://github.com/meerkatone/binja_diff_view/releases/tag/v0.1.7).
+   [v0.1.8 release](https://github.com/meerkatone/binja_diff_view/releases/tag/v0.1.8).
 2. In the download directory, check its checksum:
 
    ```sh
@@ -128,8 +129,9 @@ evidence rather than a verdict. Similarity includes instruction order and operan
 but does not prove semantic equivalence. Confidence is a heuristic method score,
 not a calibrated probability. Ambiguous inferred pairs are capped at 50%.
 
-Match schema 25 reserves unique exact/name anchors before assigning uncertain
-pairs. Tentative neighborhood correspondences help rank candidates but never
+Match schema 26 reserves unique exact/name anchors before assigning uncertain
+pairs. A function that is the only unmatched neighbor of agreeing anchors is
+paired even when a patch has rewritten most of its body. Tentative neighborhood correspondences help rank candidates but never
 reserve endpoints or establish binding identity. Rare shared strings can nominate
 functions outside the size shortlist when their instruction bodies also overlap.
 The first comparison of a database requests each function's analysis, because

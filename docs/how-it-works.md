@@ -360,10 +360,20 @@ SmallPrimes uses a native prime-product key over normalized mnemonic counts. The
 key is case- and order-independent but preserves multiplicity. It only generates
 candidates: final body similarity includes normalized operand content, so an
 operand-only patch cannot remain 100% similar merely because its mnemonic bag is
-unchanged. Operands that Binary Ninja explicitly marks as addresses are
-normalized to avoid penalizing ordinary relocation. Integer displacements are
-only treated as addresses when they occur inside a memory operand and resolve
-to a section in the current BinaryView. Generated address-derived
+unchanged. Address operands are normalized to avoid penalizing ordinary
+relocation, but extraction schema 13 requires positive evidence before an
+integer counts as one. The value must be a code or data reference of the
+instruction, or a basic-block start of the function. Otherwise it must be an
+absolute value of at least 0x10000 inside a section. A PE image-relative table
+offset also counts, but only in an indexed memory operand. The token type alone
+is not evidence. x86 renders every immediate whose operand width equals the
+address size as a possible address, so `cmp rdx, 0x100` would otherwise
+compare equal to `cmp rdx, 0xff`. A small displacement resolves into the
+Mach-O or PE headers relative to the image base. Accepting that made
+structure-field and stack-slot changes such as `[x8, #0x8]` → `[x8, #0x10]`
+cosmetic. Both are now literal in the function matcher, the security delta,
+and the graph and linear overlays. The trade-off is that a changed stack frame
+counts as changed code. Generated address-derived
 `CodeSymbolToken` and `DataSymbolToken` names such as `sub_<address>` and
 `data_<address>` normalize as well. Imported, debug, and analyst-provided
 symbols remain literal, as do integer tokens regardless of magnitude. This
@@ -445,6 +455,17 @@ The matcher deliberately favors predictable runtime on large binaries:
   nominate up to 48 candidates in each direction outside the size shortlist,
   provided instruction-content overlap is at least 50%. Very large equal-size
   groups still require linear cheap ranking per function;
+- schema 26 accepts a CallGraph pair whose body score is below the relaxed
+  neighborhood threshold when call-graph position forces it. The pair must be
+  the only unmatched candidate on both sides of a binding anchor's caller or
+  callee set. At least two matched neighbors must agree, none may disagree,
+  and the bodies must share instruction content. Security patches that add a
+  guard block to a small function routinely fall below the body threshold:
+  the memcpy fixture's `copy_record` scores 0.158. Before schema 26 the patch
+  appeared as one removed and one added function, with no side-by-side diff.
+  Such pairs report their low similarity unchanged, and their confidence is
+  capped at 50%. One witness is not enough, because it cannot distinguish a
+  patched function from a replaced one;
 - unmatched functions can receive a review hint when a unique pair shares a
   reciprocal accepted caller and callee, at least one witness is binding, and
   their instruction content overlaps. Conflicting accepted neighbors and
@@ -533,8 +554,13 @@ above are the current ones; earlier schemas used different filters, recorded in
 - **Matched** means raw ordered instructions, CFG topology, and outgoing-call
   count agree.
 - **Cosmetic** means raw rendering differs but the canonical ordered body, CFG,
-  and outgoing-call count agree after relocation normalization.
+  and outgoing-call count agree after relocation normalization. A call whose
+  only difference is the matched callee's name is cosmetic. This happens when
+  one build is stripped, or a function was named on one side only.
 - **Changed** means the canonical body, CFG, or outgoing-call count differs.
+  It also covers a call that now reaches a different matched function.
+  Generated names such as `sub_1000` normalize to the same address token, so
+  without this check a stripped build's redirected call compared equal.
 - Corpus tabs count a match as unchanged from this content state. A result
   that carries no content state is unchanged at similarity 0.9995 or above.
   The matrix, families, lineage, and transition cells share that rule.

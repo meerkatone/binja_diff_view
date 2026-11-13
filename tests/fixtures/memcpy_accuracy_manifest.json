@@ -11,5 +11,5 @@
     {"a": "0x100000658", "b": "0x100000524", "identity": "memcpy_chk"}
   ],
   "unmatched_reference": ["0x10000064c"],
-  "minimum_correct_pairs": 4
+  "minimum_correct_pairs": 5
 }

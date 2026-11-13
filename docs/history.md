@@ -4,7 +4,7 @@ This file preserves earlier schema notes and validation measurements that were
 previously part of [How Binja Diff View works](how-it-works.md). Entries
 describe the behavior and results at the time they were recorded; later schemas
 supersede parts of them. For current behavior, see the main document. Match
-schema 25 is current. Changes in schemas 23 and 24 were not recorded separately
+schema 26 is current. Changes in schemas 23 and 24 were not recorded separately
 here.
 
 Some measurements rely on private inputs that are not in this repository, such
@@ -57,6 +57,74 @@ evidence and cannot be reproduced from the repository alone.
   It scores patch blocks by diff indices so structured nodes may safely share a
   source address. Graph-local labels and generated jump-table relocations are
   cosmetic; changed bounds and call targets remain semantic.
+- schema 26 / extraction schema 13 fixes two ways a real patch was hidden.
+  - Literal operands typed as addresses. x86 renders every immediate whose
+    operand width equals the address size as `PossibleAddressToken`, which the
+    matcher normalized to `<address>`. On x86-64, `cmp rdx, 0x100` against
+    `cmp rdx, 0xff` therefore stayed `Exact`/`Cosmetic`. Every positive memory
+    displacement was also tried as `image start + value`, which lands in the
+    Mach-O or PE header. The committed arm64 extraction types the `0x18` in
+    `str w0, [sp, #0x18]` and the `0x8` in `ldr x8, [x8, #0x8]` as addresses.
+    Changing either one left the pair `Exact`/`Cosmetic` with similarity 1.0. An
+    integer is now an address only when the instruction references it, it is a
+    block start of the function, or it is an absolute value of at least 0x10000
+    inside a section. A PE image-relative offset in an indexed operand also
+    counts. The graph and linear overlays apply the same rule.
+  - Patched functions left unmatched. The fixture's `copy_record` gains a
+    bounds-check block and scores 0.158 against its vulnerable build. It was
+    reported as A-only `sub_1000004c4` and B-only `copy_record`, with only a
+    review hint between them. It is the only unmatched callee of `main` and
+    the only unmatched caller of `__memcpy_chk` on both sides, with two
+    agreeing neighbors and no contradictions. A unique anchor-neighborhood pair
+    like this is now accepted as a CallGraph match, with confidence capped at
+    50%.
+  - Callee identity through the match map. The fixture's `main` is identical
+    apart from calling `sub_1000004c4` in one build and `copy_record` in the
+    other. It was `Changed`, with "added: privileged capability" from the word
+    `copy`. A callee rename implied by unique accepted matches is now
+    cosmetic, both for content state and for the security delta. Conversely,
+    in stripped builds a call redirected from one matched `sub_` function to
+    another normalized to the same `<address>` and stayed `Exact` or
+    `Cosmetic`. It is now `Changed`.
+  - Mach-O symbol spelling. The stripped build names `_main` from its symbol
+    table, while the debug build names `main`. The name keys differed, so
+    `main` matched through MdIndex and could not anchor its neighbors. Name
+    keys now drop one leading underscore, unless the binary also defines the
+    shorter spelling.
+  - Security vocabulary. Short terms counted inside unrelated words: `read`
+    in `pthread`, `uid` in `cpuid`, `rsa` in `traversal`, `file` in
+    `profile`. They now count only at a word start, and compound spellings
+    such as `getuid`, `setuid`, and `chroot` are listed explicitly. A guard
+    added to a function that already calls a memory routine records that
+    call as level-1 context. It is not direct evidence, because the guard is
+    not proven to protect the call.
+
+  The memcpy fixture now has five of five pairs correct, with no wrong pair, in
+  both directions. The patched wrapper's security state is `Possible`. As a
+  matched pair, only its delta is scored, so the unchanged `__memcpy_chk` call
+  counts only as context for the added guard.
+
+  Fresh GUI extractions of labelled vulnerable → fixed pairs were compared with
+  the previous plugin's extractions of the same binaries:
+
+  - curl 8.3.0 → 8.4.0 (CVE-2023-38545). `_do_SOCKS5` is `Changed` and
+    `Possible`. 35,914 stack-slot and structure-field operands were retyped
+    from address to integer. No pair was added or lost. 165 functions moved
+    from `Cosmetic` to `Changed`, and each of them differs only by a field
+    displacement after 8.4.0 enlarged its configuration structures. Six
+    tool-option fragments that differ only by a field offset were paired
+    differently; nothing in their code identifies the correct counterpart.
+  - sshd 9.7p1 → sshd-session 9.8p1 (CVE-2024-6387). The fresh extraction
+    produced 7,172 matches, 43 A-only and 7 B-only functions. The previous
+    extraction produced 7,171, 44 and 7. Replayed through the 0.1.8 engine,
+    the previous extraction reports `_grace_alarm_handler` as `Changed`. This
+    run did not write the fresh match result to disk. OpenSSH 9.8's renamed
+    callees (`_has_any_alg` to `_kex_has_any_alg` and
+    `_remote_hostname` to `_ssh_remote_hostname`) leave three callers
+    `Cosmetic` instead of `Changed`.
+
+  Earlier measurements, such as schema 25's `screensharingd` cosmetic count,
+  predate the new operand typing.
 - schema 25 / extraction schema 12 fixes false `Strong` rows in a GUI test of
   `screensharingd` 26.6 (25G72) → 26.6.1 (25G76). `sub_100002824` and similar
   functions had equal sizes and zero instruction delta but were `Changed ·

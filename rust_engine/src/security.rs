@@ -6,7 +6,9 @@
 //! function with a direct patch mechanic, and propagated evidence cannot
 //! propagate again.
 
-use crate::algorithms::{is_call_mnemonic, normalized_instruction_content};
+use crate::algorithms::{
+    callee_rename_map, is_call_mnemonic, normalized_instruction_content, with_renamed_callees,
+};
 use crate::types::{
     ContentMatch, FunctionInfo, FunctionMatch, SecurityAssessment, SecurityFacts,
     SecurityRelevanceState,
@@ -96,12 +98,24 @@ const IDENTITY: &[&str] = &[
     "sandbox",
     "audit token",
     "entitlement",
+    "getuid",
+    "geteuid",
+    "setuid",
+    "seteuid",
+    "setreuid",
+    "setresuid",
+    "getgid",
+    "getegid",
+    "setgid",
+    "setegid",
+    "chroot",
 ];
 const CAPABILITY: &[&str] = &[
-    "file", "read", "write", "create", "execute", "command", "launch", "helper", "copy",
+    "file", "read", "write", "create", "execute", "command", "launch", "helper", "copy", "fread",
+    "pread",
 ];
 const MEMORY: &[&str] = &[
-    "memcpy", "memmove", "strcpy", "buffer", "alloc", "overflow", "bounds",
+    "memcpy", "memmove", "strcpy", "buffer", "alloc", "overflow", "bounds", "bcopy",
 ];
 const NUMERIC: &[&str] = &[
     "length", "size", "count", "offset", "negative", "overflow", "range", "maximum", "minimum",
@@ -129,8 +143,24 @@ const MAINTENANCE: &[&str] = &[
     "version string",
 ];
 
+/// Short terms that also occur inside unrelated words: `read` in `pthread`,
+/// `uid` in `cpuid`, `rsa` in `traversal`, `file` in `profile`. They count only
+/// at the start of a word; common compound spellings such as `getuid` and
+/// `chroot` are listed explicitly in the vocabulary instead.
+const WORD_START_TERMS: &[&str] = &[
+    "read", "uid", "gid", "rsa", "srp", "vnc", "tls", "root", "user", "file", "copy", "step",
+];
+
+fn contains_term(text: &str, term: &str) -> bool {
+    if !WORD_START_TERMS.contains(&term) {
+        return text.contains(term);
+    }
+    text.match_indices(term)
+        .any(|(index, _)| index == 0 || !text.as_bytes()[index - 1].is_ascii_alphabetic())
+}
+
 fn contains_any(text: &str, terms: &[&str]) -> bool {
-    terms.iter().any(|term| text.contains(term))
+    terms.iter().any(|term| contains_term(text, term))
 }
 
 fn is_generated_wpp_trace_identifier(value: &str) -> bool {
@@ -329,15 +359,18 @@ fn observe(facts: &mut SecurityFacts, evidence: &mut BTreeSet<String>, text: &st
     }
 }
 
-fn observe_instruction(facts: &mut SecurityFacts, evidence: &mut BTreeSet<String>, text: &str) {
-    observe(facts, evidence, text, 2);
+fn is_guard_instruction(text: &str) -> bool {
     let mnemonic = text.split('\u{1f}').next().unwrap_or_default();
-    if mnemonic == "cmp"
+    mnemonic == "cmp"
         || mnemonic == "test"
         || matches!(mnemonic, "cbz" | "cbnz" | "tbz" | "tbnz")
         || (mnemonic.starts_with("b."))
         || (mnemonic.starts_with('j') && mnemonic != "jmp")
-    {
+}
+
+fn observe_instruction(facts: &mut SecurityFacts, evidence: &mut BTreeSet<String>, text: &str) {
+    observe(facts, evidence, text, 2);
+    if is_guard_instruction(text) {
         join_fact(&mut facts.guard, 2);
         evidence.insert("validation/control-flow instruction".into());
     }
@@ -383,6 +416,20 @@ fn direct_node(
         }
     }
     let direct_facts = facts.clone();
+    // A bounds check added in front of an unchanged copy is the usual memory-
+    // safety fix, but the copy itself is not part of the delta. Record the
+    // existing sink as context only: the guard is not proven to dominate it.
+    if added_instructions
+        .iter()
+        .any(|instruction| is_guard_instruction(instruction))
+        && after_instructions.iter().any(|instruction| {
+            let mnemonic = instruction.split('\u{1f}').next().unwrap_or_default();
+            is_call_mnemonic(mnemonic) && contains_any(instruction, MEMORY)
+        })
+    {
+        join_fact(&mut facts.memory, 1);
+        evidence.insert("added guard in a function with an existing memory operation".into());
+    }
     // Strings describe context, not verified operations or trust boundaries.
     for string in &added_strings {
         let mut labels = BTreeSet::new();
@@ -560,6 +607,8 @@ pub fn assess_diff(
         .collect();
     let matched_a: FxHashSet<_> = matches.iter().map(|item| item.function_a.address).collect();
     let matched_b: FxHashSet<_> = matches.iter().map(|item| item.function_b.address).collect();
+    // A renamed callee is the same call; only a changed target is evidence.
+    let renames = callee_rename_map(matches, functions_a, functions_b);
     let mut nodes = Vec::new();
     for (index, item) in matches.iter().enumerate() {
         if item.content_match != ContentMatch::Changed {
@@ -569,7 +618,8 @@ pub fn assess_diff(
             by_a.get(&item.function_a.address),
             by_b.get(&item.function_b.address),
         ) {
-            nodes.push(direct_node(Some(before), after, Some(index)));
+            let before = with_renamed_callees(before, &renames);
+            nodes.push(direct_node(Some(&before), after, Some(index)));
         }
     }
     for function in functions_b {
@@ -657,6 +707,20 @@ pub fn assess_diff(
 mod tests {
     use super::*;
     use crate::types::{InstructionInfo, MatchDetails, MatchType};
+
+    #[test]
+    fn short_terms_do_not_match_inside_unrelated_words() {
+        assert!(!contains_any("bl\u{1f}_pthread_mutex_lock", CAPABILITY));
+        assert!(!contains_any("cpuid", IDENTITY));
+        assert!(!contains_any("path traversal", CRYPTO));
+        assert!(!contains_any("load_profile", CAPABILITY));
+        assert!(contains_any("bl\u{1f}_read", CAPABILITY));
+        assert!(contains_any("bl\u{1f}_getuid", IDENTITY));
+        assert!(contains_any("call\u{1f}chroot", IDENTITY));
+        assert!(contains_any("readfile", CAPABILITY));
+        assert!(contains_any("rsa_verify", CRYPTO));
+        assert!(contains_any("copy_record", CAPABILITY));
+    }
 
     fn function(
         address: u64,

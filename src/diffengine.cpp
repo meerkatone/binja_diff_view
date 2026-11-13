@@ -215,13 +215,93 @@ std::optional<uint64_t> displayedIntegerValue(std::string_view text)
 	return value;
 }
 
-bool addressResolvesIntoImage(BinaryView* bv, uint64_t value)
+// Decides whether an integer operand is relocatable address material, which
+// matching normalizes, or a literal, which must stay exact. Patches commonly
+// change only a literal: a bound (`cmp rdx, 0x100` -> `0xff`), a structure
+// field (`[x8, #0x8]` -> `[x8, #0x10]`), or a stack slot. Two renderer facts
+// make the token type alone unreliable:
+//  - x86 emits PossibleAddressToken for every immediate whose operand width
+//    equals the address size, so most 64-bit (x86-64) and 32-bit (x86)
+//    arithmetic and comparison immediates arrive typed as possible addresses.
+//  - Small displacements resolve into mapped memory when the image is based at
+//    zero, and `start + value` lands in the Mach-O or PE header for any field
+//    offset. Accepting either made struct-field and stack-slot changes
+//    compare equal.
+// An operand is therefore an address only with positive evidence: analysis
+// references it, it is a branch target in this function, it is an absolute
+// value inside a section, or it is a PE image-relative table offset.
+class OperandAddressPolicy
 {
-	if (bv->GetSegmentAt(value) || !bv->GetSectionsAt(value).empty())
+  public:
+	// Values below this are literals unless analysis references them. Field
+	// offsets, stack slots, bounds, and masks routinely fall below 64 KiB,
+	// while images based at zero map headers and early sections there.
+	static constexpr uint64_t kMinimumAbsoluteAddress = 0x10000;
+	// PE image-relative tables index a section; no PE section starts below
+	// its 4 KiB-aligned headers in ordinary images.
+	static constexpr uint64_t kMinimumImageRelativeOffset = 0x1000;
+
+	OperandAddressPolicy(BinaryView* view, Function* func) :
+	    m_view(view), m_start(view->GetStart()), m_hasSections(!view->GetSections().empty()),
+	    m_imageRelativeTables(view->GetTypeName() == "PE")
+	{
+		if (func)
+			for (const auto& block : func->GetBasicBlocks())
+				m_blockStarts.insert(block->GetStart());
+	}
+
+	bool isAddress(uint64_t value, const std::set<uint64_t>& lineReferences,
+	    bool indexedMemoryOperand) const
+	{
+		if (lineReferences.count(value) || m_blockStarts.count(value))
+			return true;
+		if (absolute(value))
+			return true;
+		return indexedMemoryOperand && m_imageRelativeTables
+		    && value >= kMinimumImageRelativeOffset && value <= UINT64_MAX - m_start
+		    && !m_view->GetSectionsAt(m_start + value).empty();
+	}
+
+  private:
+	bool absolute(uint64_t value) const
+	{
+		if (value < kMinimumAbsoluteAddress)
+			return false;
+		if (!m_view->GetSectionsAt(value).empty())
+			return true;
+		// Raw images such as firmware blobs may have segments but no sections.
+		return !m_hasSections && m_view->GetSegmentAt(value);
+	}
+
+	BinaryView* m_view;
+	uint64_t m_start;
+	bool m_hasSections;
+	bool m_imageRelativeTables;
+	std::set<uint64_t> m_blockStarts;
+};
+
+std::set<uint64_t> lineReferences(BinaryView* view, Function* func, Architecture* arch, uint64_t addr)
+{
+	std::set<uint64_t> references;
+	if (!func)
+		return references;
+	for (uint64_t target : view->GetCodeReferencesFrom({func, arch, addr}))
+		references.insert(target);
+	return references;
+}
+
+// Integer and possible-address tokens: is this one address material? Other
+// token kinds keep their own classification.
+bool integerOperandIsAddress(const OperandAddressPolicy& policy, const InstructionTextToken& token,
+    std::string_view text, const std::set<uint64_t>& references, bool indexedMemoryOperand)
+{
+	if (policy.isAddress(token.value, references, indexedMemoryOperand))
 		return true;
-	return value <= UINT64_MAX - bv->GetStart()
-	    && (bv->GetSegmentAt(bv->GetStart() + value)
-	        || !bv->GetSectionsAt(bv->GetStart() + value).empty());
+	// Some renderers expose a zero or adjusted value while retaining the
+	// actual displacement in the token text.
+	auto displayed = displayedIntegerValue(text);
+	return displayed && *displayed != token.value
+	    && policy.isAddress(*displayed, references, indexedMemoryOperand);
 }
 
 // AArch64 builds an address from a page base and a low immediate, as in
@@ -245,9 +325,9 @@ static bool isResolvedPageOffset(BinaryView* bv, const ReferenceSource& source,
 		value = displayedIntegerValue(token.text);
 	if (!value || *value > kPageOffsetMask)
 		return false;
-	// The target must itself be mapped. The image-relative fallback of
-	// addressResolvesIntoImage would accept a small constant as base + value,
-	// which trivially shares its own page offset.
+	// The target must itself be mapped. An image-relative reading would accept
+	// a small constant as base + value, which trivially shares its own page
+	// offset.
 	auto isPageOffsetOf = [&](uint64_t target) {
 		return target > kPageOffsetMask && (target & kPageOffsetMask) == *value
 		    && (bv->GetSegmentAt(target) || !bv->GetSectionsAt(target).empty());
@@ -661,16 +741,19 @@ std::string DiffEngine::call(JsonFn fn, const std::string& request)
 }
 
 // `func` is non-null only for disassembly graphs, whose line addresses are
-// native instructions with code references.
+// native instructions with code references. `owner` is the function for every
+// IL form; its references and blocks decide whether a possible address is one.
 static json linesToJson(const std::vector<DisassemblyTextLine>& lines, Function* func,
-    std::vector<uint64_t>& lineAddrs, std::vector<size_t>& lineInstrIndices)
+    Function* owner, std::vector<uint64_t>& lineAddrs, std::vector<size_t>& lineInstrIndices)
 {
 	json out = json::array();
+	const OperandAddressPolicy addressPolicy(owner->GetView(), owner);
 	for (const auto& line : lines)
 	{
 		json tokens = json::array();
 		std::string text;
 		bool annotationSeen = false;
+		std::optional<std::set<uint64_t>> references;
 		// In disassembly, an `adrp` page base renders as whatever symbol starts on
 		// that page, possibly as several tokens. Fold it into one address token.
 		const bool pageBase = func && !line.tokens.empty()
@@ -705,8 +788,18 @@ static json linesToJson(const std::vector<DisassemblyTextLine>& lines, Function*
 			const bool pageOffset = func
 			    && isResolvedPageOffset(func->GetView(),
 			        {func, func->GetArchitecture(), line.addr}, line.tokens, tok);
-			tokens.push_back({{"kind", pageOffset ? tokenKind(AddressDisplayToken) : tokenKind(tok.type)},
-			    {"text", tok.text}});
+			BNInstructionTextTokenType kind = pageOffset ? AddressDisplayToken : tok.type;
+			// x86 renders most full-width immediates as possible addresses. A
+			// bound such as `cmp rdx, 0x100` must stay a constant in the overlay.
+			if (kind == PossibleAddressToken)
+			{
+				if (!references)
+					references = lineReferences(
+					    owner->GetView(), owner, owner->GetArchitecture(), line.addr);
+				if (!integerOperandIsAddress(addressPolicy, tok, tok.text, *references, false))
+					kind = IntegerToken;
+			}
+			tokens.push_back({{"kind", tokenKind(kind)}, {"text", tok.text}});
 			text += tok.text;
 		}
 		out.push_back({{"tokens", std::move(tokens)}, {"text", std::move(text)}});
@@ -773,8 +866,8 @@ std::optional<ExtractedFunction> DiffEngine::extract(
 		block.index = i;
 		block.basicBlock = nodes[i]->GetBasicBlock();
 		json lines = linesToJson(nodes[i]->GetLines(),
-		    viewType.type == NormalFunctionGraph ? func.GetPtr() : nullptr, block.lineAddrs,
-		    block.lineInstrIndices);
+		    viewType.type == NormalFunctionGraph ? func.GetPtr() : nullptr, func.GetPtr(),
+		    block.lineAddrs, block.lineInstrIndices);
 		block.linesJson = dumpBinaryDerivedJson(lines);
 		block.firstAddr = block.lineAddrs.empty() ? func->GetStart() : block.lineAddrs.front();
 		for (const auto& edge : nodes[i]->GetOutgoingEdges())
@@ -927,6 +1020,7 @@ static json matchFunctionToJson(BinaryView* bv, Function* func, DisassemblySetti
 	if (auto found = derivedStrings.find(func->GetStart()); found != derivedStrings.end())
 		referencedStrings = found->second;
 	size_t instrCount = 0, byteCount = 0, edgeCount = 0;
+	const OperandAddressPolicy addressPolicy(bv, func);
 	for (auto& bb : func->GetBasicBlocks())
 	{
 		json blockInstrs = json::array();
@@ -937,7 +1031,11 @@ static json matchFunctionToJson(BinaryView* bv, Function* func, DisassemblySetti
 			json operands = json::array();
 			json operandTypes = json::array();
 			int memoryOperandDepth = 0;
+			size_t memoryOperandRegisters = 0;
+			bool memoryOperandScaled = false;
 			bool annotationSeen = false;
+			const std::set<uint64_t> references =
+			    lineReferences(bv, func, bb->GetArchitecture(), line.addr);
 			for (const auto& tok : line.tokens)
 			{
 				// An `adrp` operand is a 4 KiB page base, not a reference: the string
@@ -975,27 +1073,42 @@ static json matchFunctionToJson(BinaryView* bv, Function* func, DisassemblySetti
 				// emits '[' and ']' as BraceToken values.
 				if (tok.type == BeginMemoryOperandToken
 				    || (tok.type == BraceToken && t == "["))
-					memoryOperandDepth++;
+				{
+					if (memoryOperandDepth++ == 0)
+					{
+						memoryOperandRegisters = 0;
+						memoryOperandScaled = false;
+					}
+				}
 				else if ((tok.type == EndMemoryOperandToken
 				             || (tok.type == BraceToken && t == "]"))
 				    && memoryOperandDepth > 0)
 					memoryOperandDepth--;
+				else if (memoryOperandDepth > 0 && tok.type == RegisterToken)
+					memoryOperandRegisters++;
+				else if (memoryOperandDepth > 0 && tok.type == OperationToken && t == "*")
+					memoryOperandScaled = true;
 				if (!t.empty() && t != ",")
 				{
 					operands.push_back(t);
 					auto operandType = tok.type;
-					if (tok.type == IntegerToken && memoryOperandDepth > 0)
+					if (isResolvedPageOffset(
+					        bv, {func, bb->GetArchitecture(), line.addr}, line.tokens, tok))
+						operandType = AddressDisplayToken;
+					else if (tok.type == PossibleAddressToken
+					    || (tok.type == IntegerToken && memoryOperandDepth > 0))
 					{
-						bool pointsIntoImage = addressResolvesIntoImage(bv, tok.value);
-						if (!pointsIntoImage)
-							if (auto displayed = displayedIntegerValue(t))
-								pointsIntoImage = addressResolvesIntoImage(bv, *displayed);
-						if (pointsIntoImage)
+						// Only a table index can be relative to the image base; a
+						// single base register plus displacement is a field or slot.
+						const bool indexed = memoryOperandDepth > 0
+						    && (memoryOperandScaled || memoryOperandRegisters > 1);
+						const bool address =
+						    integerOperandIsAddress(addressPolicy, tok, t, references, indexed);
+						if (tok.type == PossibleAddressToken)
+							operandType = address ? PossibleAddressToken : IntegerToken;
+						else if (address)
 							operandType = AddressDisplayToken;
 					}
-					else if (isResolvedPageOffset(
-					             bv, {func, bb->GetArchitecture(), line.addr}, line.tokens, tok))
-						operandType = AddressDisplayToken;
 					operandTypes.push_back(static_cast<unsigned>(operandType));
 				}
 			}
@@ -1009,8 +1122,7 @@ static json matchFunctionToJson(BinaryView* bv, Function* func, DisassemblySetti
 				operandTypes = json::array({operandTypes[0], static_cast<unsigned>(PossibleAddressToken)});
 			}
 			if (mnemonic != "adrp")
-				for (uint64_t target :
-				    bv->GetCodeReferencesFrom({func, bb->GetArchitecture(), line.addr}))
+				for (uint64_t target : references)
 					addStringTarget(bv, target, referencedStrings);
 			size_t length = bv->GetInstructionLength(bb->GetArchitecture(), line.addr);
 			// Matching consumes mnemonic and operand text. Raw bytes, instruction

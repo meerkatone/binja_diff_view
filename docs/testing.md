@@ -161,14 +161,22 @@ release engine:
 python3 tests/accuracy_memcpy_fixture.py build/rust-engine-target/release/librust_diff.dylib
 ```
 
-The schema-25 baseline (unchanged since schema 24) is four correct pairs, zero wrong pairs, 80% recall and
-the same mapping in both directions. The changed wrapper remains unmatched;
-its primary body score is 0.158, below the current call-neighborhood gate.
-It now has a review hint for the stripped counterpart. The hint must remain
-outside accepted matches and disappear when a second counterpart competes or
-the candidate body is unrelated.
-This small fixture measures one known miss and guards against regressions. It
+The schema-26 baseline is five correct pairs, zero wrong pairs, 100% recall,
+and the same mapping in both directions. The changed wrapper's body score is
+0.158, below the call-neighborhood gate. It is accepted as a CallGraph match
+because it is the only unmatched neighbor of two agreeing matched anchors. Its
+confidence is capped at 50%. The Rust tests also require that a second
+competing counterpart, or an unrelated body, prevents that match.
+This small fixture measures the formerly missed wrapper and guards against regressions. It
 cannot calibrate confidence or establish broad-corpus precision and recall.
+
+For labelled real pairs, open curl 8.3.0 → 8.4.0 and sshd 9.7p1 → sshd-session
+9.8p1 from `sample_corpora/artifacts`, then run Open Workspace with the older
+build as A. In 0.1.8, the CVE fix functions `_do_SOCKS5` and
+`_grace_alarm_handler` must both be `Changed`. Layout-only changes are
+`Changed` too, because their machine code differs. Rank them below control-flow
+changes by similarity and security state; do not expect a `Cosmetic` label.
+`docs/history.md` records the measured counts.
 
 Use a separate build against Binary Ninja Commercial and its matching API.
 Personal does not support headless execution; use it for desktop validation.

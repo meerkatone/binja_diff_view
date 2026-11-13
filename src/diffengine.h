@@ -229,8 +229,8 @@ using FunctionMatchMapsRef = std::shared_ptr<const FunctionMatchMaps>;
 
 // Persistent artifacts and patch signatures use these values to reject data
 // produced by an incompatible extraction or matching implementation.
-inline constexpr int CurrentMatchSchemaVersion = 25;
-inline constexpr int CurrentExtractionSchemaVersion = 12;
+inline constexpr int CurrentMatchSchemaVersion = 26;
+inline constexpr int CurrentExtractionSchemaVersion = 13;
 
 // A prepared result is valid only while the exact current object and both view
 // epochs remain current. UI construction may span event turns, so carrying the

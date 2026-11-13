@@ -282,6 +282,147 @@ pub fn classify_content_match(a: &FunctionInfo, b: &FunctionInfo) -> ContentMatc
     }
 }
 
+fn name_counts(functions: &[FunctionInfo]) -> FxHashMap<&str, usize> {
+    let mut counts = FxHashMap::default();
+    for function in functions {
+        *counts.entry(function.name.as_str()).or_insert(0) += 1;
+    }
+    counts
+}
+
+/// Function renames implied by accepted matches, keyed by the A-side name.
+/// When only one build is symbolized, or an analyst renamed a function on one
+/// side, every call to it differs only in the callee's rendered symbol. Only
+/// names unique on their own side are mapped, so a rename cannot be applied to
+/// the wrong function.
+pub(crate) fn callee_rename_map(
+    matches: &[crate::FunctionMatch],
+    functions_a: &[FunctionInfo],
+    functions_b: &[FunctionInfo],
+) -> FxHashMap<String, String> {
+    let (counts_a, counts_b) = (name_counts(functions_a), name_counts(functions_b));
+    matches
+        .iter()
+        .filter(|matched| {
+            let (a, b) = (&matched.function_a.name, &matched.function_b.name);
+            !a.is_empty()
+                && !b.is_empty()
+                && a != b
+                && counts_a.get(a.as_str()) == Some(&1)
+                && counts_b.get(b.as_str()) == Some(&1)
+        })
+        .map(|matched| {
+            (
+                matched.function_a.name.clone(),
+                matched.function_b.name.clone(),
+            )
+        })
+        .collect()
+}
+
+/// Rewrite A-side call-target symbols through `renames`, so a callee rename
+/// is not mistaken for a changed call. Only CodeSymbolToken operands change;
+/// data symbols and imports keep their own identities.
+pub(crate) fn with_renamed_callees<'a>(
+    function: &'a FunctionInfo,
+    renames: &FxHashMap<String, String>,
+) -> std::borrow::Cow<'a, FunctionInfo> {
+    const CODE_SYMBOL_TOKEN: u8 = 64;
+    let renamed = |instruction: &crate::InstructionInfo| {
+        instruction
+            .operands
+            .iter()
+            .zip(&instruction.operand_types)
+            .any(|(operand, kind)| *kind == CODE_SYMBOL_TOKEN && renames.contains_key(operand))
+    };
+    let affected = function.instructions.iter().any(renamed)
+        || function
+            .basic_blocks
+            .iter()
+            .any(|block| block.instructions.iter().any(renamed));
+    if renames.is_empty() || !affected {
+        return std::borrow::Cow::Borrowed(function);
+    }
+    let rewrite = |instruction: &mut crate::InstructionInfo| {
+        for (operand, kind) in instruction
+            .operands
+            .iter_mut()
+            .zip(&instruction.operand_types)
+        {
+            if *kind == CODE_SYMBOL_TOKEN {
+                if let Some(target) = renames.get(operand.as_str()) {
+                    *operand = target.clone();
+                }
+            }
+        }
+    };
+    let mut translated = function.clone();
+    for instruction in translated.instructions.iter_mut().chain(
+        translated
+            .basic_blocks
+            .iter_mut()
+            .flat_map(|block| block.instructions.iter_mut()),
+    ) {
+        rewrite(instruction);
+    }
+    std::borrow::Cow::Owned(translated)
+}
+
+/// Names of accepted matches that kept the same unique name on both sides.
+pub(crate) fn unchanged_callee_names(
+    matches: &[crate::FunctionMatch],
+    functions_a: &[FunctionInfo],
+    functions_b: &[FunctionInfo],
+) -> FxHashSet<String> {
+    let (counts_a, counts_b) = (name_counts(functions_a), name_counts(functions_b));
+    matches
+        .iter()
+        .filter(|matched| {
+            let name = &matched.function_a.name;
+            !name.is_empty()
+                && *name == matched.function_b.name
+                && counts_a.get(name.as_str()) == Some(&1)
+                && counts_b.get(name.as_str()) == Some(&1)
+        })
+        .map(|matched| matched.function_a.name.clone())
+        .collect()
+}
+
+/// For two bodies already aligned instruction-for-instruction, report a call
+/// whose target symbol does not correspond through the accepted matches.
+/// Generated names such as `sub_1000` normalize to `<address>` for matching,
+/// so in stripped builds a patch that redirects a call from one matched
+/// function to another would otherwise compare equal.
+pub(crate) fn has_retargeted_call(
+    a: &FunctionInfo,
+    b: &FunctionInfo,
+    renames: &FxHashMap<String, String>,
+    unchanged: &FxHashSet<String>,
+) -> bool {
+    const CODE_SYMBOL_TOKEN: u8 = 64;
+    let expected = |name: &str| -> Option<&str> {
+        renames
+            .get(name)
+            .map(String::as_str)
+            .or_else(|| unchanged.get(name).map(String::as_str))
+    };
+    a.basic_blocks
+        .iter()
+        .zip(&b.basic_blocks)
+        .flat_map(|(left, right)| left.instructions.iter().zip(&right.instructions))
+        .any(|(left, right)| {
+            left.operands
+                .iter()
+                .zip(&left.operand_types)
+                .zip(right.operands.iter().zip(&right.operand_types))
+                .any(|((operand_a, kind_a), (operand_b, kind_b))| {
+                    *kind_a == CODE_SYMBOL_TOKEN
+                        && *kind_b == CODE_SYMBOL_TOKEN
+                        && expected(operand_a).is_some_and(|target| target != operand_b)
+                })
+        })
+}
+
 /// True for call-like mnemonics across common architectures.
 pub(crate) fn is_call_mnemonic(m: &str) -> bool {
     let m = m.trim();

@@ -198,37 +198,151 @@ mod tests {
         (a, b)
     }
 
+    fn json(functions: &[FunctionInfo]) -> String {
+        serde_json::to_string(functions).unwrap()
+    }
+
+    /// The patched wrapper gains a bounds-check block, which drops its body
+    /// score to 0.158. It is still the only unmatched callee of the matched
+    /// caller and the only unmatched caller of the matched `__memcpy_chk`, so
+    /// call-graph structure must pair it as a changed function rather than
+    /// leaving the patch as one removed and one added function.
     #[test]
-    fn changed_memcpy_wrapper_is_suggested_without_becoming_an_accepted_match() {
+    fn patched_memcpy_wrapper_is_matched_by_call_graph_structure() {
         let engine = BinaryDiffEngine::new();
         let forward = engine.perform_diff_json(REFERENCE, TARGET).unwrap();
         let reverse = engine.perform_diff_json(TARGET, REFERENCE).unwrap();
-        assert_eq!(forward.matched_functions.len(), 4);
-        assert!(forward
+        assert_eq!(forward.matched_functions.len(), 5);
+        let wrapper = forward
+            .matched_functions
+            .iter()
+            .find(|matched| matched.function_a.address == 0x1000005ac)
+            .expect("patched wrapper must be matched");
+        assert_eq!(wrapper.function_b.address, 0x1000004c4);
+        assert_eq!(wrapper.match_type, crate::MatchType::CallGraph);
+        assert_eq!(wrapper.content_match, crate::types::ContentMatch::Changed);
+        assert!(wrapper.similarity < 0.35);
+        assert!(wrapper.confidence <= 0.5);
+        assert!(wrapper.details.neighbor_support >= 2);
+        // Vulnerable -> fixed: the added `b.ls` guard sits in front of the
+        // unchanged memcpy call.
+        let fixed = reverse
+            .matched_functions
+            .iter()
+            .find(|matched| matched.function_b.address == 0x1000005ac)
+            .unwrap();
+        assert!(fixed.security.evidence.iter().any(|item| {
+            item == "added guard in a function with an existing memory operation"
+        }));
+        assert_eq!(wrapper.details.neighbor_contradictions, 0);
+        assert!(forward.review_suggestions.is_empty());
+        // `main` differs only in calling `copy_record` by its stripped name
+        // and in relocated branch targets.
+        let main = forward
+            .matched_functions
+            .iter()
+            .find(|matched| matched.function_a.name == "main")
+            .unwrap();
+        assert_eq!(main.content_match, crate::types::ContentMatch::Cosmetic);
+        // The stripped build's `_main` and the debug build's `main` are one
+        // symbol, so `main` is a binding name anchor.
+        assert_eq!(main.match_type, crate::MatchType::Name);
+        assert!(main.details.binding_anchor);
+        assert_eq!(
+            main.security.state,
+            crate::types::SecurityRelevanceState::Unknown
+        );
+        assert!(reverse.matched_functions.iter().any(|matched| {
+            (matched.function_a.address, matched.function_b.address) == (0x1000004c4, 0x1000005ac)
+        }));
+    }
+
+    #[test]
+    fn competing_or_unrelated_graph_candidates_are_not_forced_or_suggested() {
+        // A second unmatched counterpart at the same call sites removes the
+        // structural uniqueness that justifies a low-similarity match.
+        let (a, mut b) = inputs();
+        let mut copy = b
+            .iter()
+            .find(|function| function.address == 0x1000004c4)
+            .unwrap()
+            .clone();
+        copy.address = 0x100010000;
+        copy.name = "sub_100010000".into();
+        copy.basic_blocks[0].address = copy.address;
+        b.iter_mut()
+            .find(|function| function.name == "_main")
+            .unwrap()
+            .callees
+            .push(copy.address);
+        b.iter_mut()
+            .find(|function| function.name == "___memcpy_chk")
+            .unwrap()
+            .callers
+            .push(copy.address);
+        b.push(copy);
+        let competing = BinaryDiffEngine::new()
+            .perform_diff_json(&json(&a), &json(&b))
+            .unwrap();
+        assert!(competing
             .matched_functions
             .iter()
             .all(|matched| matched.function_a.address != 0x1000005ac));
-        assert_eq!(forward.review_suggestions.len(), 1);
-        let suggestion = &forward.review_suggestions[0];
-        assert_eq!(
-            (suggestion.a_address, suggestion.b_address),
-            (0x1000005ac, 0x1000004c4)
-        );
-        assert!(suggestion.body_similarity < 0.35);
-        assert_eq!(
-            (
-                reverse.review_suggestions[0].a_address,
-                reverse.review_suggestions[0].b_address
-            ),
-            (suggestion.b_address, suggestion.a_address)
-        );
+        assert!(competing.review_suggestions.is_empty());
+
+        // An unrelated body at the same call-graph position is not forced.
+        let (a, mut b) = inputs();
+        let changed = b
+            .iter_mut()
+            .find(|function| function.address == 0x1000004c4)
+            .unwrap();
+        for instruction in changed.instructions.iter_mut().chain(
+            changed
+                .basic_blocks
+                .iter_mut()
+                .flat_map(|block| block.instructions.iter_mut()),
+        ) {
+            instruction.mnemonic = "unrelated_opcode".into();
+        }
+        let unrelated = BinaryDiffEngine::new()
+            .perform_diff_json(&json(&a), &json(&b))
+            .unwrap();
+        assert!(unrelated
+            .matched_functions
+            .iter()
+            .all(|matched| matched.function_a.address != 0x1000005ac));
     }
 
     #[test]
     fn competing_or_unrelated_graph_candidates_are_not_suggested() {
-        let result = BinaryDiffEngine::new()
+        // Exercise the hint layer directly with the wrapper left unmatched.
+        let mut result = BinaryDiffEngine::new()
             .perform_diff_json(REFERENCE, TARGET)
             .unwrap();
+        result
+            .matched_functions
+            .retain(|matched| matched.function_a.address != 0x1000005ac);
+        let (a, b) = inputs();
+        result.unmatched_functions_a.extend(
+            a.iter()
+                .filter(|function| function.address == 0x1000005ac)
+                .map(FunctionInfo::slimmed_clone),
+        );
+        result.unmatched_functions_b.extend(
+            b.iter()
+                .filter(|function| function.address == 0x1000004c4)
+                .map(FunctionInfo::slimmed_clone),
+        );
+        let hints = find_review_suggestions(
+            &a,
+            &b,
+            &result.matched_functions,
+            &result.unmatched_functions_a,
+            &result.unmatched_functions_b,
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(hints.len(), 1);
         let (a, mut b) = inputs();
         let mut copy = b
             .iter()

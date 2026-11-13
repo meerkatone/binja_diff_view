@@ -320,6 +320,109 @@ mod tests {
             .unwrap()
     }
 
+    /// Stripped build: `dispatch` calls one of two distinct helpers.
+    fn stripped_call_graph(base: u64, called_helper: usize) -> Vec<FunctionInfo> {
+        let helper = |address: u64, mnemonics: &[&str]| {
+            let instructions: Vec<InstructionInfo> = mnemonics
+                .iter()
+                .map(|mnemonic| InstructionInfo {
+                    mnemonic: (*mnemonic).into(),
+                    operands: vec!["x0".into()],
+                    operand_types: vec![3],
+                    ..Default::default()
+                })
+                .collect();
+            FunctionInfo {
+                name: format!("sub_{address:x}"),
+                address,
+                basic_blocks: vec![BasicBlockInfo {
+                    address,
+                    instructions,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+        };
+        let helpers = [
+            helper(base + 0x100, &["sub", "orr", "lsl", "asr", "ret"]),
+            helper(base + 0x200, &["add", "eor", "lsr", "ror", "mul", "ret"]),
+        ];
+        let target = helpers[called_helper].address;
+        let instructions = vec![
+            InstructionInfo {
+                mnemonic: "stp".into(),
+                operands: vec!["x29".into(), "x30".into()],
+                operand_types: vec![3, 3],
+                ..Default::default()
+            },
+            InstructionInfo {
+                mnemonic: "bl".into(),
+                operands: vec![format!("sub_{target:x}")],
+                operand_types: vec![64],
+                ..Default::default()
+            },
+            InstructionInfo {
+                mnemonic: "ret".into(),
+                ..Default::default()
+            },
+        ];
+        let mut dispatch = FunctionInfo {
+            name: format!("sub_{base:x}"),
+            address: base,
+            basic_blocks: vec![BasicBlockInfo {
+                address: base,
+                instructions,
+                ..Default::default()
+            }],
+            callees: vec![target],
+            ..Default::default()
+        };
+        dispatch.callees.sort_unstable();
+        let mut functions = vec![dispatch];
+        for mut helper in helpers {
+            if helper.address == target {
+                helper.callers = vec![base];
+            }
+            functions.push(helper);
+        }
+        functions
+    }
+
+    fn content_of(result: &DiffResult, address_a: u64) -> ContentMatch {
+        result
+            .matched_functions
+            .iter()
+            .find(|matched| matched.function_a.address == address_a)
+            .map(|matched| matched.content_match.clone())
+            .expect("function must be matched")
+    }
+
+    #[test]
+    fn relocated_stripped_call_is_cosmetic_but_retargeted_call_is_changed() {
+        let a = stripped_call_graph(0x1000, 0);
+        let relocated = diff(a.clone(), stripped_call_graph(0x8000, 0));
+        assert_eq!(content_of(&relocated, 0x1000), ContentMatch::Cosmetic);
+
+        // `bl sub_1100` -> `bl sub_8200`: both render as generated symbols, but
+        // sub_1100 corresponds to sub_8100, so the patch redirected the call.
+        let retargeted = diff(a, stripped_call_graph(0x8000, 1));
+        assert!(retargeted.matched_functions.iter().any(|matched| {
+            (matched.function_a.address, matched.function_b.address) == (0x1100, 0x8100)
+        }));
+        assert_eq!(content_of(&retargeted, 0x1000), ContentMatch::Changed);
+    }
+
+    #[test]
+    fn callee_named_on_one_side_only_is_cosmetic_for_its_callers() {
+        let a = stripped_call_graph(0x1000, 0);
+        let mut b = stripped_call_graph(0x8000, 0);
+        b[1].name = "parse_record".into();
+        b[0].basic_blocks[0].instructions[1].operands = vec!["parse_record".into()];
+        let result = diff(a, b);
+        assert_eq!(content_of(&result, 0x1000), ContentMatch::Cosmetic);
+        assert_eq!(content_of(&result, 0x1100), ContentMatch::Exact);
+    }
+
     #[test]
     fn changed_operand_is_not_exact() {
         let result = diff(

@@ -653,6 +653,34 @@ fn is_auto_generated_name(name: &str) -> bool {
     is_generated_function_name(name)
 }
 
+/// Identity keys for name evidence; generated names carry none. Mach-O C
+/// symbols keep their leading underscore (`_main`) when only the symbol table
+/// names them, while a build with debug information names the same function
+/// `main`. Exactly one leading underscore is dropped unless the binary also
+/// defines the shorter spelling, so two distinct functions never share a key.
+fn name_keys(functions: &[FunctionInfo]) -> Vec<Option<String>> {
+    let names: FxHashSet<&str> = functions.iter().map(|f| f.name.as_str()).collect();
+    functions
+        .iter()
+        .map(|function| {
+            let name = function.name.as_str();
+            if is_auto_generated_name(name) {
+                return None;
+            }
+            let key = name
+                .strip_prefix('_')
+                .filter(|rest| {
+                    !rest.is_empty()
+                        && !rest.starts_with('_')
+                        && !names.contains(rest)
+                        && !is_auto_generated_name(rest)
+                })
+                .unwrap_or(name);
+            Some(key.to_string())
+        })
+        .collect()
+}
+
 /// Pair-independent matching features, prepared once for a retained snapshot.
 /// Only unsorted inputs need a canonical copy; original order is kept for exports.
 pub(crate) struct PreparedMatching {
@@ -889,11 +917,8 @@ impl MatchingEngine {
         }
         let wl_a: Vec<Option<&str>> = functions_a.iter().map(wl_key).collect();
         let wl_b: Vec<Option<&str>> = functions_b.iter().map(wl_key).collect();
-        fn meaningful_name(function: &FunctionInfo) -> Option<&str> {
-            (!is_auto_generated_name(&function.name)).then_some(function.name.as_str())
-        }
-        let names_a: Vec<Option<&str>> = functions_a.iter().map(meaningful_name).collect();
-        let names_b: Vec<Option<&str>> = functions_b.iter().map(meaningful_name).collect();
+        let names_a = name_keys(functions_a);
+        let names_b = name_keys(functions_b);
 
         let mut evidence = TrustedMatchEvidence::new(functions_a, functions_b);
         evidence.seed_unique(exact_a, exact_b, cancelled)?;
@@ -1062,6 +1087,8 @@ impl MatchingEngine {
                 functions_b,
                 features_a,
                 features_b,
+                &names_a,
+                &names_b,
                 &evidence,
                 &mut matches,
                 &mut used_a,
@@ -1188,6 +1215,37 @@ impl MatchingEngine {
                 evidence.prune_context(cancelled)?;
                 continue;
             }
+            // A call whose only difference is the matched callee's rendered
+            // name is not a code change: one build may be stripped, or an
+            // analyst may have named the function on one side only.
+            let renames = crate::algorithms::callee_rename_map(&matches, functions_a, functions_b);
+            let unchanged =
+                crate::algorithms::unchanged_callee_names(&matches, functions_a, functions_b);
+            for matched in &mut matches {
+                let a = &functions_a[indices_a[&matched.function_a.address]];
+                if matched.content_match != crate::types::ContentMatch::Changed {
+                    // Equal under normalization, but a call now reaches a
+                    // different matched function.
+                    if crate::algorithms::has_retargeted_call(
+                        a,
+                        &functions_b[indices_b[&matched.function_b.address]],
+                        &renames,
+                        &unchanged,
+                    ) {
+                        matched.content_match = crate::types::ContentMatch::Changed;
+                    }
+                    continue;
+                }
+                let b = &functions_b[indices_b[&matched.function_b.address]];
+                let translated = crate::algorithms::with_renamed_callees(a, &renames);
+                if matches!(translated, std::borrow::Cow::Owned(_))
+                    && crate::algorithms::classify_content_match(&translated, b)
+                        != crate::types::ContentMatch::Changed
+                    && !crate::algorithms::has_retargeted_call(a, b, &renames, &unchanged)
+                {
+                    matched.content_match = crate::types::ContentMatch::Cosmetic;
+                }
+            }
             for matched in &mut matches {
                 let a = indices_a[&matched.function_a.address];
                 let b = indices_b[&matched.function_b.address];
@@ -1216,6 +1274,8 @@ impl MatchingEngine {
         functions_b: &[FunctionInfo],
         features_a: &[FunctionFeatures],
         features_b: &[FunctionFeatures],
+        names_a: &[Option<String>],
+        names_b: &[Option<String>],
         evidence: &TrustedMatchEvidence,
         matches: &mut Vec<FunctionMatch>,
         used_a: &mut FxHashSet<usize>,
@@ -1224,9 +1284,9 @@ impl MatchingEngine {
     ) -> Result<()> {
         let mut name_map_b: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
 
-        for (i, func_b) in functions_b.iter().enumerate() {
-            if !used_b.contains(&i) && !is_auto_generated_name(&func_b.name) {
-                name_map_b.entry(func_b.name.as_str()).or_default().push(i);
+        for (i, key) in names_b.iter().enumerate() {
+            if let (false, Some(key)) = (used_b.contains(&i), key) {
+                name_map_b.entry(key.as_str()).or_default().push(i);
             }
         }
 
@@ -1235,10 +1295,13 @@ impl MatchingEngine {
             if cancelled() {
                 bail!("function matching cancelled");
             }
-            if used_a.contains(&idx_a) || is_auto_generated_name(&func_a.name) {
+            if used_a.contains(&idx_a) {
                 continue;
             }
-            if let Some(candidates) = name_map_b.get(func_a.name.as_str()) {
+            let Some(key_a) = &names_a[idx_a] else {
+                continue;
+            };
+            if let Some(candidates) = name_map_b.get(key_a.as_str()) {
                 for &idx in candidates {
                     if cancelled() {
                         bail!("function matching cancelled");
@@ -1421,9 +1484,16 @@ impl MatchingEngine {
             .map(|(i, f)| (f.address, i))
             .collect();
 
-        let worklist: Vec<(usize, usize)> =
+        let mut worklist: Vec<(usize, usize)> =
             evidence.anchors_a.iter().map(|(&a, &b)| (a, b)).collect();
+        worklist.sort_unstable();
         let mut scored_by_pair = FxHashMap::default();
+        // Pairs accepted on call-graph structure despite a body score below the
+        // relaxed threshold. A security patch that adds a guard block to a
+        // small function can halve its body similarity (the fixture's
+        // copy_record scores 0.16), yet it remains the only unmatched callee or
+        // caller at the same matched call sites.
+        let mut forced = FxHashSet::default();
 
         for (anchor_a, anchor_b) in worklist {
             if cancelled() {
@@ -1456,6 +1526,7 @@ impl MatchingEngine {
                 if cand_a.is_empty() || cand_b.is_empty() {
                     continue;
                 }
+                let unique_neighbor = cand_a.len() == 1 && cand_b.len() == 1;
 
                 // Score all pairs in this (small) neighborhood, then accept
                 // greedily best-first for deterministic, conflict-free picks.
@@ -1474,7 +1545,25 @@ impl MatchingEngine {
                                 &features_a[ia],
                                 &features_b[ib],
                             );
-                        if similarity >= relaxed_threshold {
+                        // Structure alone needs two independent matched
+                        // neighbors that agree, none that disagree, and some
+                        // shared body content. One witness cannot tell a
+                        // patched function from a replaced one.
+                        let structurally_forced = similarity < relaxed_threshold
+                            && unique_neighbor
+                            && similarity > 0.0
+                            && DiffAlgorithms::instruction_content_overlap(
+                                &features_a[ia],
+                                &features_b[ib],
+                            ) > 0.0
+                            && {
+                                let (support, contradictions) = evidence.neighbor_counts(ia, ib);
+                                support >= 2 && contradictions == 0
+                            };
+                        if structurally_forced {
+                            forced.insert((ia, ib));
+                        }
+                        if similarity >= relaxed_threshold || structurally_forced {
                             let body_pairing_score = DiffAlgorithms::pairing_score(
                                 &functions_a[ia],
                                 &functions_b[ib],
@@ -1498,10 +1587,13 @@ impl MatchingEngine {
                 }
             }
         }
-        for candidate in assign_candidates(scored_by_pair.into_values().collect()) {
+        let mut candidates: Vec<Candidate> = scored_by_pair.into_values().collect();
+        candidates.sort_by_key(|candidate| (candidate.a, candidate.b));
+        for candidate in assign_candidates(candidates) {
             if cancelled() {
                 return false;
             }
+            let structurally_forced = forced.contains(&(candidate.a, candidate.b));
             Self::push_match(
                 matches,
                 used_a,
@@ -1515,6 +1607,13 @@ impl MatchingEngine {
                 candidate.details,
                 MatchType::CallGraph,
             );
+            if structurally_forced {
+                // Identity rests on call-graph position, not on the body.
+                // Present it as a review-level correspondence.
+                if let Some(last) = matches.last_mut() {
+                    last.confidence = last.confidence.min(0.5);
+                }
+            }
         }
         true
     }
@@ -1714,6 +1813,27 @@ mod tests {
             instruction_count: 5,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn mach_o_underscore_matches_debug_name_without_merging_distinct_functions() {
+        let function = |name: &str| FunctionInfo {
+            name: name.into(),
+            ..Default::default()
+        };
+        let keys = name_keys(&[
+            function("_main"),
+            function("main_loop"),
+            function("sub_1000"),
+        ]);
+        assert_eq!(keys[0].as_deref(), Some("main"));
+        assert_eq!(keys[1].as_deref(), Some("main_loop"));
+        assert_eq!(keys[2], None);
+        // Both spellings defined in one binary are different functions.
+        let keys = name_keys(&[function("_init"), function("init"), function("__cxa")]);
+        assert_eq!(keys[0].as_deref(), Some("_init"));
+        assert_eq!(keys[1].as_deref(), Some("init"));
+        assert_eq!(keys[2].as_deref(), Some("__cxa"));
     }
 
     #[test]
@@ -2209,5 +2329,105 @@ mod tests {
         assert_eq!(matches[0].match_type, MatchType::SmallPrimes);
         assert!(matches[0].similarity < 0.999);
         assert!(matches[0].confidence < 0.90);
+    }
+
+    /// Build caller -> target -> callee, where caller and callee are unique
+    /// exact anchors and the target body changed heavily between builds.
+    fn patched_neighborhood(
+        base: u64,
+        target_mnemonics: &[&str],
+        target_blocks: usize,
+        with_callee: bool,
+    ) -> Vec<FunctionInfo> {
+        let body = |name: &str, address: u64, mnemonics: &[&str], blocks: usize| {
+            let instructions: Vec<InstructionInfo> = mnemonics
+                .iter()
+                .map(|mnemonic| InstructionInfo {
+                    mnemonic: (*mnemonic).into(),
+                    operands: vec!["x0".into()],
+                    ..Default::default()
+                })
+                .collect();
+            let per_block = instructions.len().div_ceil(blocks);
+            let basic_blocks = instructions
+                .chunks(per_block)
+                .enumerate()
+                .map(|(index, chunk)| BasicBlockInfo {
+                    address: address + 0x10 * index as u64,
+                    instructions: chunk.to_vec(),
+                    edges: if (index + 1) * per_block < instructions.len() {
+                        vec![address + 0x10 * (index as u64 + 1)]
+                    } else {
+                        Vec::new()
+                    },
+                    ..Default::default()
+                })
+                .collect();
+            FunctionInfo {
+                name: name.into(),
+                address,
+                basic_blocks,
+                ..Default::default()
+            }
+        };
+        let (caller, target, callee) = (base, base + 0x1000, base + 0x2000);
+        let mut functions = vec![
+            body(
+                &format!("sub_{caller:x}"),
+                caller,
+                &["stp", "mov", "bl", "ldr", "eor", "ldp", "ret"],
+                1,
+            ),
+            body(
+                &format!("sub_{target:x}"),
+                target,
+                target_mnemonics,
+                target_blocks,
+            ),
+        ];
+        functions[0].callees = vec![target];
+        functions[1].callers = vec![caller];
+        if with_callee {
+            let mut leaf = body(
+                &format!("sub_{callee:x}"),
+                callee,
+                &["sub", "orr", "lsl", "asr", "ret"],
+                1,
+            );
+            leaf.callers = vec![target];
+            functions[1].callees = vec![callee];
+            functions.push(leaf);
+        }
+        crate::BinaryDiffEngine::preprocess_functions(&mut functions);
+        functions
+    }
+
+    #[test]
+    fn unique_call_graph_position_matches_a_heavily_patched_function() {
+        let vulnerable = ["sub", "stp", "str", "ldr", "bl", "ldrb", "ret"];
+        let patched = [
+            "sub", "stp", "str", "ldr", "cmp", "b.ls", "adrp", "ldr", "bl", "mov", "b", "ldr",
+            "bl", "ldrb", "stur", "b", "ldur", "ldp", "add", "ret",
+        ];
+        let a = patched_neighborhood(0x1000_0000, &vulnerable, 1, true);
+        let b = patched_neighborhood(0x2000_0000, &patched, 5, true);
+        let matches = MatchingEngine::new().match_functions(&a, &b).unwrap();
+        let target = matches
+            .iter()
+            .find(|matched| matched.function_a.address == 0x1000_1000)
+            .expect("two agreeing anchors must pair the unique neighbor");
+        assert_eq!(target.function_b.address, 0x2000_1000);
+        assert_eq!(target.match_type, MatchType::CallGraph);
+        assert!(target.similarity < 0.35);
+        assert!(target.confidence <= 0.5);
+
+        // With only the caller as a witness, a replaced function at the same
+        // call site cannot be told apart from a patched one.
+        let a = patched_neighborhood(0x1000_0000, &vulnerable, 1, false);
+        let b = patched_neighborhood(0x2000_0000, &patched, 5, false);
+        let matches = MatchingEngine::new().match_functions(&a, &b).unwrap();
+        assert!(matches
+            .iter()
+            .all(|matched| matched.function_a.address != 0x1000_1000));
     }
 }
