@@ -121,7 +121,12 @@ evidence and cannot be reproduced from the repository alone.
     versions. All ten were decided by a tie-break (margin near zero), carry
     50% confidence, and appear under **Ambiguous only**. Their two agreeing
     neighbors are a null handler and a return block that every such fragment
-    shares, so that support does not discriminate.
+    shares, so that support does not discriminate. Rejecting every
+    non-anchor `Changed` pair with a margin below 0.01 removed all ten, but it
+    also removed eight verified same-address pairs from the controlled
+    netp191 and oem7a corpora. There, a patched function has an identical
+    twin, and address order breaks the tie correctly. That rule was not
+    adopted.
   - sshd 9.7p1 → sshd-session 9.8p1 (CVE-2024-6387). The fresh extraction
     produced 7,172 matches, 43 A-only and 7 B-only functions. The previous
     extraction produced 7,171, 44 and 7. Replayed through the 0.1.8 engine,
