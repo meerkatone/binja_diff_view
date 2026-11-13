@@ -131,6 +131,15 @@ evidence and cannot be reproduced from the repository alone.
     true pairs (2 in netp191 and 6 in oem7a), because patched twins also share
     a shape. Content alone does not separate these cases, and neither rule
     was adopted.
+  - The Demo 1 and Demo 2 lineages label the releases that introduced each
+    CVE. Their earlier extractions were replayed through the 0.1.8 engine.
+    sshd 8.4p1 → 8.5p1, where the regreSSHion regression was introduced,
+    reports `_grace_alarm_handler` as `Changed` (Name, 99% confidence); 9.4p1
+    → 9.7p1, where the handler is unchanged, reports it as `Cosmetic`. curl
+    7.68.0 → 7.69.0, where the SOCKS5 bug was introduced, reports
+    `_Curl_SOCKS5` as `Changed`. The 7.69.0 → 7.88.1 rename to `_do_SOCKS5`
+    is followed as a CallGraph match. Neither function is unmatched in any
+    transition.
   - The controlled netp191 and oem7a pairs patch operands in place, so each
     function's address is its identity. Replaying their earlier extractions
     through the 0.1.8 engine gives a precision of 99.49% with recall of
