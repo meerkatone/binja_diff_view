@@ -111,9 +111,17 @@ evidence and cannot be reproduced from the repository alone.
     `Possible`. 35,914 stack-slot and structure-field operands were retyped
     from address to integer. No pair was added or lost. 165 functions moved
     from `Cosmetic` to `Changed`, and each of them differs only by a field
-    displacement after 8.4.0 enlarged its configuration structures. Six
-    tool-option fragments that differ only by a field offset were paired
-    differently; nothing in their code identifies the correct counterpart.
+    displacement after 8.4.0 enlarged its configuration structures.
+  - Ground truth from curl's option jump tables and alias table shows ten
+    false pairs, in 0.1.7 and 0.1.8 alike. In 8.3.0, Binary Ninja split ten
+    `-E` option handlers (`--cacert`, `--key`, `--pinnedpubkey` and others)
+    into functions. In 8.4.0 the same handlers remain inside the parser, so
+    the correct result is A-only. Both engines paired them with look-alike
+    `$` option handlers instead. Six of the pairs changed between the
+    versions. All ten were decided by a tie-break (margin near zero), carry
+    50% confidence, and appear under **Ambiguous only**. Their two agreeing
+    neighbors are a null handler and a return block that every such fragment
+    shares, so that support does not discriminate.
   - sshd 9.7p1 → sshd-session 9.8p1 (CVE-2024-6387). The fresh extraction
     produced 7,172 matches, 43 A-only and 7 B-only functions. The previous
     extraction produced 7,171, 44 and 7. Replayed through the 0.1.8 engine,
