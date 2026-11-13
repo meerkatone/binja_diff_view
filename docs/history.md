@@ -140,10 +140,12 @@ evidence and cannot be reproduced from the repository alone.
     unmatched or paired with a twin at 50% confidence.
   - sshd 9.7p1 → sshd-session 9.8p1 (CVE-2024-6387). The fresh extraction
     produced 7,172 matches, 43 A-only and 7 B-only functions. The previous
-    extraction produced 7,171, 44 and 7. Replayed through the 0.1.8 engine,
-    the previous extraction reports `_grace_alarm_handler` as `Changed`. This
-    run did not write the fresh match result to disk. OpenSSH 9.8's renamed
-    callees (`_has_any_alg` to `_kex_has_any_alg` and
+    extraction produced 7,171, 44 and 7. The released 0.1.8 package, running
+    in Binary Ninja 6.1.11136-dev, reports `_grace_alarm_handler`
+    (`0x100004654` → `0x100002878`) as `Changed`. It is a Name match with
+    74.9% similarity, 97.5% confidence and a margin of 100%, and the fixed
+    handler is 13 instructions shorter (144 → 92 bytes). OpenSSH 9.8's
+    renamed callees (`_has_any_alg` to `_kex_has_any_alg` and
     `_remote_hostname` to `_ssh_remote_hostname`) leave three callers
     `Cosmetic` instead of `Changed`.
 
