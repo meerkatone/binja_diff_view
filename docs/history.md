@@ -125,8 +125,12 @@ evidence and cannot be reproduced from the repository alone.
     non-anchor `Changed` pair with a margin below 0.01 removed all ten, but it
     also removed eight verified same-address pairs from the controlled
     netp191 and oem7a corpora. There, a patched function has an identical
-    twin, and address order breaks the tie correctly. That rule was not
-    adopted.
+    twin, and address order breaks the tie correctly. A narrower rule rejected
+    only tie-broken `Changed` pairs that shared an instruction shape with
+    another such pair. It removed 6 of the 10 false pairs and still lost 8
+    true pairs (2 in netp191 and 6 in oem7a), because patched twins also share
+    a shape. Content alone does not separate these cases, and neither rule
+    was adopted.
   - The controlled netp191 and oem7a pairs patch operands in place, so each
     function's address is its identity. Replaying their earlier extractions
     through the 0.1.8 engine gives a precision of 99.49% with recall of
