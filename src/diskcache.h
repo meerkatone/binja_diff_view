@@ -63,6 +63,7 @@ inline DiskCacheRetention trimDiskCache(const QString& root, uint64_t budget,
 		}
 	}
 	result.entries = artifacts.size();
+	if (result.bytes <= budget && result.entries <= maximumEntries) return result;
 	std::sort(artifacts.begin(), artifacts.end(), [budget](const auto& a, const auto& b) {
 		// A legacy oversized entry must not force out every usable smaller one.
 		if ((a.bytes > budget) != (b.bytes > budget)) return a.bytes > budget;

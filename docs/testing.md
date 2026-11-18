@@ -39,7 +39,8 @@ remain available as explicit build targets.
 
 The disk-cache test uses a temporary directory to check combined byte/count
 limits, access promotion, oversized legacy entries, and exclusions for exports,
-pending files, and symlinks. It never trims the user's actual cache.
+pending files, and symlinks. Retention sorts artifacts by eviction priority only
+when their total size or count exceeds a limit. The test uses an isolated cache.
 
 The work-gate test checks same-key exclusion, progress on other keys, cancellation
 while an owner remains active, exception recovery, lease ownership and bounded
