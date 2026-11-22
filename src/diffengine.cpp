@@ -241,9 +241,9 @@ class OperandAddressPolicy
 	// its 4 KiB-aligned headers in ordinary images.
 	static constexpr uint64_t kMinimumImageRelativeOffset = 0x1000;
 
-	OperandAddressPolicy(BinaryView* view, Function* func) :
-	    m_view(view), m_start(view->GetStart()), m_hasSections(!view->GetSections().empty()),
-	    m_imageRelativeTables(view->GetTypeName() == "PE")
+	OperandAddressPolicy(Ref<BinaryView> view, Function* func) :
+	    m_view(std::move(view)), m_start(m_view->GetStart()), m_hasSections(!m_view->GetSections().empty()),
+	    m_imageRelativeTables(m_view->GetTypeName() == "PE")
 	{
 		if (func)
 			for (const auto& block : func->GetBasicBlocks())
@@ -273,7 +273,8 @@ class OperandAddressPolicy
 		return !m_hasSections && m_view->GetSegmentAt(value);
 	}
 
-	BinaryView* m_view;
+	// Function::GetView() can supply a temporary Ref; keep its wrapper alive.
+	Ref<BinaryView> m_view;
 	uint64_t m_start;
 	bool m_hasSections;
 	bool m_imageRelativeTables;
